@@ -79,5 +79,23 @@
     "description": "等宽字体文件名",
     "hint": "代码块专用字体，文件需放置于 ziti 目录，支持 .otf/.ttf/.ttc 格式。留空、文件不存在或加载失败时自动回退到系统字体（Consolas/Courier New 等）",
     "default": ""
+  },
+  "emoji_cache_dir": {
+    "type": "string",
+    "description": "Emoji 磁盘缓存目录（相对或绝对路径）",
+    "hint": "留空则使用插件根目录下的 .emoji-cache 目录。缓存可跨会话复用，减少网络请求。",
+    "default": ""
+  },
+  "emoji_timeout": {
+    "type": "int",
+    "description": "Emoji 下载超时时间（秒）",
+    "hint": "从 Twemoji CDN 下载 emoji 图片的超时时间，网络环境较差时可适当调高。",
+    "default": 10
+  },
+  "emoji_failed_ttl": {
+    "type": "int",
+    "description": "Emoji 失败缓存 TTL（秒）",
+    "hint": "下载失败的 emoji 在此时间内不再重复请求，避免反复失败。默认 3600 秒（1 小时）。",
+    "default": 3600
   }
 }

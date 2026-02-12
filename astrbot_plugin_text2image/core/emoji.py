@@ -45,10 +45,35 @@ class EmojiHandler:
         "https://abs.twimg.com/emoji/v2/72x72",
     ]
     
-    def __init__(self, font_dir: Path = None):
-        self._font_dir = font_dir
+    def __init__(self, font_dir: Path = None, cache_dir: Path = None, 
+                timeout: int = 10, failed_ttl: int = 3600):
+        """
+        初始化 Emoji 处理器
+        
+        Args:
+            font_dir: 字体目录（保留兼容性，未使用）
+            cache_dir: Emoji 磁盘缓存目录，默认为插件根目录下的 .emoji-cache
+            timeout: 下载超时时间（秒），默认 10 秒
+            failed_ttl: 失败缓存 TTL（秒），默认 3600 秒（1 小时）
+        """
+        from astrbot.api import logger
+        import time
+        
+        # 确定缓存目录：使用传入的 cache_dir，否则使用插件根目录下的 .emoji-cache
+        if cache_dir is None and font_dir is not None:
+            cache_dir = font_dir.parent / ".emoji-cache"
+        elif cache_dir is None:
+            # 回退到当前工作目录
+            cache_dir = Path.cwd() / ".emoji-cache"
+        
+        self._cache_dir = Path(cache_dir)
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        
+        self._timeout = timeout
+        self._failed_ttl = failed_ttl
         self._cache: Dict[str, Image.Image] = {}
-        self._failed: set = set()
+        # 失败缓存从 set 改为 Dict[str, float]，记录时间戳
+        self._failed: Dict[str, float] = {}
     
     def split_text(self, text: str) -> List[TextSegment]:
         """将文本拆分为普通文字和 emoji"""
@@ -92,15 +117,50 @@ class EmojiHandler:
         return result
     
     def render_emoji(self, emoji: str, size: int) -> Optional[Image.Image]:
-        """从 Twemoji CDN 获取 emoji 图片"""
+        """从 Twemoji CDN 获取 emoji 图片，支持磁盘缓存和失败 TTL"""
+        from astrbot.api import logger
+        import time
+        
         cache_key = f"{emoji}_{size}"
+        
+        # 1. 检查内存缓存
         if cache_key in self._cache:
+            logger.debug(f"[Emoji] 内存缓存命中: {cache_key}")
             return self._cache[cache_key].copy()
         
+        # 2. 检查失败缓存（带 TTL）
         if emoji in self._failed:
-            return None
+            failed_time = self._failed[emoji]
+            if time.time() - failed_time < self._failed_ttl:
+                # 仍在 TTL 内，跳过请求
+                logger.debug(f"[Emoji] 失败缓存命中: {repr(emoji)} (TTL 未过期)")
+                return None
+            else:
+                # TTL 已过期，移除失败记录
+                logger.debug(f"[Emoji] 失败缓存过期，重新尝试: {repr(emoji)}")
+                del self._failed[emoji]
         
-        # 生成所有可能的 URL
+        # 3. 计算磁盘缓存文件名
+        # 使用 emoji codepoint + size 作为文件名，确保唯一性
+        codepoints = '_'.join(f'{ord(c):04X}' for c in emoji)
+        cache_filename = f"{codepoints}_{size}.png"
+        cache_file_path = self._cache_dir / cache_filename
+        
+        # 4. 检查磁盘缓存
+        if cache_file_path.exists():
+            try:
+                with open(cache_file_path, 'rb') as f:
+                    img = Image.open(f).convert("RGBA")
+                    # 调整到目标大小
+                    img = img.resize((size, size), Image.LANCZOS)
+                    # 写入内存缓存
+                    self._cache[cache_key] = img
+                    logger.debug(f"[Emoji] 磁盘缓存命中: {cache_file_path}")
+                    return img.copy()
+            except Exception as e:
+                logger.warning(f"[Emoji] 磁盘缓存读取失败: {cache_file_path} - {e}")
+        
+        # 5. 下载 emoji
         urls = self._get_twemoji_urls(emoji)
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         
@@ -108,19 +168,32 @@ class EmojiHandler:
         for url in urls:
             try:
                 req = Request(url, headers=headers)
-                with urlopen(req, timeout=10) as response:
-                    img = Image.open(BytesIO(response.read())).convert("RGBA")
+                # 使用配置化的超时时间
+                with urlopen(req, timeout=self._timeout) as response:
+                    img_data = response.read()
+                    img = Image.open(BytesIO(img_data)).convert("RGBA")
                     img = img.resize((size, size), Image.LANCZOS)
+                    
+                    # 写入内存缓存
                     self._cache[cache_key] = img
+
+                    # 写入磁盘缓存
+                    try:
+                        img.save(cache_file_path, "PNG")
+                        logger.debug(f"[Emoji] 磁盘缓存写入成功: {cache_file_path}")
+                    except Exception as e:
+                        logger.warning(f"[Emoji] 磁盘缓存写入失败: {cache_file_path} - {e}")
+
                     return img.copy()
             except Exception as e:
                 last_error = e
+                logger.debug(f"[Emoji] CDN 下载失败: {url} - {e}")
                 continue
         
-        # 所有 URL 都失败，打印调试信息
-        codepoints = ' '.join(f'U+{ord(c):04X}' for c in emoji)
-        print(f"[Emoji] 获取失败: {repr(emoji)} ({codepoints}) - {last_error}")
-        self._failed.add(emoji)
+        # 6. 所有 URL 都失败，记录失败时间戳
+        codepoints_str = ' '.join(f'U+{ord(c):04X}' for c in emoji)
+        logger.warning(f"[Emoji] 获取失败: {repr(emoji)} ({codepoints_str}) - {last_error}")
+        self._failed[emoji] = time.time()
         return None
     
     def _get_twemoji_urls(self, emoji: str) -> list:

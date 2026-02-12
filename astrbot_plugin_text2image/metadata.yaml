@@ -1,0 +1,7 @@
+name: astrbot_plugin_text2image_x
+display_name: 文字转图片-X
+desc: 将 Bot 文本回复渲染为图片，自适应高度，手机宽度，2x 高清，支持 Emoji，支持自动撤回
+version: v1.0.0
+author: Rensr0 (原作者) / FGlive
+repo: https://github.com/FGlive/astrbot_plugin_text2image
+source: https://github.com/Rensr0/astrbot_plugin_text2image

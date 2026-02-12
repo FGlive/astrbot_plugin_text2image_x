@@ -1,0 +1,83 @@
+{
+  "enable_render": {
+    "type": "bool",
+    "description": "拦截纯文本回复并渲染为图片",
+    "default": true
+  },
+  "render_scope": {
+    "type": "string",
+    "description": "渲染范围：llm_only=仅渲染 LLM 回复；all_text=渲染所有纯文本回复",
+    "default": "llm_only",
+    "options": ["llm_only", "all_text"]
+  },
+  "render_char_threshold": {
+    "type": "int",
+    "description": "渲染字符阈值（0 为不限制，超过阈值则直接发送纯文本）",
+    "default": 0
+  },
+  "image_width": {
+    "type": "int",
+    "description": "图片逻辑宽度（手机宽度建议 375）",
+    "default": 375
+  },
+  "image_scale": {
+    "type": "int",
+    "description": "渲染倍数（2 表示 2x 高清）",
+    "default": 2
+  },
+  "padding": {
+    "type": "int",
+    "description": "内边距（像素）",
+    "default": 24
+  },
+  "font_size": {
+    "type": "int",
+    "description": "字体大小",
+    "default": 24
+  },
+  "line_height": {
+    "type": "float",
+    "description": "行高倍数",
+    "default": 1.6
+  },
+  "bg_color": {
+    "type": "string",
+    "description": "背景颜色（十六进制）",
+    "default": "#ffffff"
+  },
+  "text_color": {
+    "type": "string",
+    "description": "文字颜色（十六进制）",
+    "default": "#333333"
+  },
+  "recall_enabled": {
+    "type": "bool",
+    "description": "启用自动撤回",
+    "hint": "开启后机器人发送的图片会在指定时间后自动撤回",
+    "default": false
+  },
+  "recall_time": {
+    "type": "int",
+    "description": "撤回时间（秒）",
+    "hint": "消息发送后多少秒自动撤回，0 表示不撤回",
+    "default": 30
+  },
+  "keep_llm_log": {
+    "type": "bool",
+    "description": "保留原LLM回复日志",
+    "hint": "关闭后不输出原始 LLM 文本日志",
+    "default": true
+  },
+  "font_name": {
+    "type": "string",
+    "description": "主字体文件名",
+    "hint": "字体文件需放置于 ziti 目录，支持 .otf/.ttf/.ttc 格式。留空或文件不存在时使用默认字体 Source_Han_Serif_SC_Light_Light.otf",
+    "default": "Source_Han_Serif_SC_Light_Light.otf"
+  },
+  "mono_font_name": {
+    "type": "string",
+    "description": "等宽字体文件名",
+    "hint": "代码块专用字体，文件需放置于 ziti 目录，支持 .otf/.ttf/.ttc 格式。留空、文件不存在或加载失败时自动回退到系统字体（Consolas/Courier New 等）",
+    "default": ""
+  }
+}

@@ -1,0 +1,812 @@
+"""文本渲染器"""
+
+import tempfile
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+from PIL import Image, ImageDraw, ImageFont
+
+from .styles import TextSegment, TableRow
+from .emoji import EmojiHandler
+from .markdown import parse_markdown, LineContext, parse_table
+
+# 不能出现在行首的标点符号（避头标点）
+NO_LINE_START = set('，。、；：？！）】》」』"\',.;:?!)>]}·…—～')
+
+
+class TextRenderer:
+    """文本渲染器"""
+
+    def __init__(self, config: Dict[str, Any], font_dir: Path):
+        self.config = config
+        self.font_dir = font_dir
+        self.emoji_handler = EmojiHandler(font_dir)
+        self._font_cache: Dict[str, ImageFont.FreeTypeFont] = {}
+        self._mono_font_cache: Dict[str, ImageFont.FreeTypeFont] = {}
+
+    def _get_config(self, key: str, default: Any) -> Any:
+        return self.config.get(key, default)
+
+    def _load_font(self, size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
+        """加载字体
+        
+        优先级: 配置字体 -> 默认字体 -> 系统默认字体
+        """
+        cache_key = f"{size}_{bold}"
+        if cache_key in self._font_cache:
+            return self._font_cache[cache_key]
+
+        # 从配置获取字体文件名，默认使用 Source Han Serif
+        configured_font = self._get_config("font_name", "Source_Han_Serif_SC_Light_Light.otf")
+        default_font = "Source_Han_Serif_SC_Light_Light.otf"
+        
+        # 按优先级尝试加载字体
+        for font_name in [configured_font, default_font]:
+            if not font_name:
+                continue
+                
+            font_path = self.font_dir / font_name
+            if font_path.exists():
+                try:
+                    font = ImageFont.truetype(str(font_path), size=size)
+                    self._font_cache[cache_key] = font
+                    return font
+                except Exception:
+                    continue
+        
+        # 所有尝试都失败，回退到系统默认字体
+        return ImageFont.load_default()
+
+    def _load_mono_font(self, size: int) -> Optional[ImageFont.FreeTypeFont]:
+        """加载等宽字体
+        
+        优先级: 配置字体 -> ziti 目录字体文件 -> 系统字体探测
+        """
+        cache_key = f"mono_{size}"
+        if cache_key in self._mono_font_cache:
+            return self._mono_font_cache[cache_key]
+
+        # 优先从配置获取等宽字体
+        configured_font = self._get_config("mono_font_name", "")
+        if configured_font:
+            font_path = self.font_dir / configured_font
+            if font_path.exists():
+                try:
+                    font = ImageFont.truetype(str(font_path), size=size)
+                    self._mono_font_cache[cache_key] = font
+                    return font
+                except Exception:
+                    pass  # 配置字体加载失败，继续尝试系统字体
+
+        # 系统字体名称列表（按优先级）
+        mono_font_names = [
+            "Consola.ttf", "Consolas.ttf",
+            "Courier New.ttf", "cour.ttf",
+            "SourceCodePro.ttf", "FiraCode.ttf",
+        ]
+
+        # 系统字体路径列表（按优先级）
+        system_font_paths = [
+            Path("C:/Windows/Fonts"),
+            Path("/usr/share/fonts"),
+            Path("/System/Library/Fonts"),
+            self.font_dir,  # 最后尝试 ziti 目录
+        ]
+
+        for font_dir in system_font_paths:
+            if not font_dir.exists():
+                continue
+            for font_name in mono_font_names:
+                font_path = font_dir / font_name
+                if font_path.exists():
+                    try:
+                        font = ImageFont.truetype(str(font_path), size=size)
+                        self._mono_font_cache[cache_key] = font
+                        return font
+                    except Exception:
+                        continue
+
+        self._mono_font_cache[cache_key] = None
+        return None
+
+    def _hex_to_rgb(self, hex_color: str) -> Tuple[int, int, int]:
+        """十六进制转 RGB"""
+        hex_color = hex_color.lstrip('#')
+        if len(hex_color) == 3:
+            hex_color = ''.join(c * 2 for c in hex_color)
+        return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+
+    def render(self, text: str) -> Optional[str]:
+        """渲染文本为图片"""
+        width = int(self._get_config("image_width", 375))
+        scale = int(self._get_config("image_scale", 2))
+        padding = int(self._get_config("padding", 24))
+        font_size = int(self._get_config("font_size", 24))
+        line_height = float(self._get_config("line_height", 1.6))
+        bg_color = str(self._get_config("bg_color", "#ffffff"))
+        text_color = str(self._get_config("text_color", "#333333"))
+
+        real_width = width * scale
+        real_padding = padding * scale
+        real_font_size = font_size * scale
+        emoji_size = int(real_font_size * 1.1)
+        text_area_width = real_width - real_padding * 2
+
+        font = self._load_font(real_font_size)
+        font_height = self._get_font_height(font, real_font_size)
+        line_pixel_height = int(real_font_size * line_height)
+
+        # 解析所有行
+        lines = text.split('\n')
+        ctx = LineContext()
+        render_items = []  # (segments, is_empty, is_table, is_hr, table_data)
+
+        for line in lines:
+            md_segments = parse_markdown(line, ctx)
+
+            # 检查是否是分割线
+            if md_segments and md_segments[0].horizontal_rule:
+                render_items.append(([], False, False, True, None))
+                continue
+
+            # 检查是否是表格（已弃用：表格现在直接转为列表渲染）
+            # 保留此分支以兼容旧版本生成的 no_wrap 表格段
+            if md_segments and md_segments[0].no_wrap and md_segments[0].text:
+                # 尝试解析为表格
+                table_data = parse_table(md_segments[0].text)
+                if table_data:
+                    render_items.append(([], False, True, False, table_data))
+                    continue
+
+            if not md_segments:
+                if ctx.in_table:
+                    continue
+                render_items.append(([], True, False, False, None))
+                continue
+
+            # 处理每个片段
+            segments = []
+            for seg in md_segments:
+                if seg.code_block:
+                    # 对代码块每行进行 emoji 分割
+                    for code_line in seg.text.split('\n'):
+                        emoji_subs = self.emoji_handler.split_text(code_line)
+                        for es in emoji_subs:
+                            # 保留 code_block 属性
+                            es.code_block = True
+                            es.no_wrap = True
+                            # 如果是 emoji，不设置 code_block（避免等宽字体渲染问题）
+                            if es.is_emoji:
+                                es.code_block = False
+                                es.no_wrap = False
+                            segments.append(es)
+                    continue
+
+                if seg.text:
+                    emoji_subs = self.emoji_handler.split_text(seg.text)
+                    for es in emoji_subs:
+                        # Emoji 片段不继承 code 属性，避免等宽字体渲染问题
+                        if not es.is_emoji:
+                            es.bold = es.bold or seg.bold
+                            es.italic = es.italic or seg.italic
+                            es.code = es.code or seg.code
+                            es.strike = es.strike or seg.strike
+                        else:
+                            # Emoji 片段只继承部分属性
+                            es.bold = es.bold or seg.bold
+                            es.italic = es.italic or seg.italic
+                            es.code = False  # 确保 emoji 不使用 code 样式
+                            es.strike = es.strike or seg.strike
+                        es.heading = es.heading or seg.heading
+                        es.quote = es.quote or seg.quote
+                        es.list_item = es.list_item or seg.list_item
+                        es.list_ordered = es.list_ordered or seg.list_ordered
+                        es.list_level = es.list_level or seg.list_level
+                        es.list_index = es.list_index or seg.list_index
+                        es.list_continuation = es.list_continuation or seg.list_continuation
+                        segments.append(es)
+                elif not seg.is_emoji:
+                    segments.append(seg)
+
+            # 计算宽度并分词
+            line_segments = []
+            current_x = 0
+            list_is_item = any(seg.list_item for seg in segments)
+            list_continuation_active = False
+            list_first_line_emitted = False
+
+            # 计算列表行的有效宽度（扣除缩进和符号宽度）
+            effective_width = text_area_width
+            list_bullet_width = 0
+            list_indent_total = 0
+            if list_is_item:
+                # 获取列表信息
+                for seg in segments:
+                    if seg.list_item:
+                        list_indent_per_level = 20 * scale  # 与绘制阶段一致
+                        list_indent_total = (seg.list_level or 1) * list_indent_per_level
+                        # 计算符号宽度（与绘制阶段一致）
+                        if seg.list_ordered:
+                            bullet_text = f"{seg.list_index}."
+                        else:
+                            bullet_text = "•"
+                        list_bullet_width = int(font.getlength(bullet_text + " "))
+                        break
+                effective_width = text_area_width - list_indent_total - list_bullet_width
+
+            for seg in segments:
+                if seg.code_block:
+                    line_segments.append((seg, int(font.getlength(seg.text))))
+                    continue
+
+                # 标题片段进入字符级换行处理
+                if seg.is_emoji:
+                    if current_x + emoji_size > effective_width and current_x > 0:
+                        if list_is_item:
+                            if list_continuation_active:
+                                for prev_seg, _ in line_segments:
+                                    prev_seg.list_continuation = True
+                            else:
+                                list_first_line_emitted = True
+                            list_continuation_active = True
+                        render_items.append((line_segments, False, False, False, None))
+                        line_segments = []
+                        current_x = 0
+                    line_segments.append((seg, emoji_size))
+                    current_x += emoji_size
+                elif seg.no_wrap:
+                    seg_width = int(font.getlength(seg.text))
+                    if current_x + seg_width > effective_width and current_x > 0:
+                        if list_is_item:
+                            if list_continuation_active:
+                                for prev_seg, _ in line_segments:
+                                    prev_seg.list_continuation = True
+                            else:
+                                list_first_line_emitted = True
+                            list_continuation_active = True
+                        render_items.append((line_segments, False, False, False, None))
+                        line_segments = []
+                        current_x = 0
+                    line_segments.append((seg, seg_width))
+                    current_x += seg_width
+                else:
+                    # 确定用于计算宽度的字体
+                    calc_font = font
+                    if seg.heading:
+                        heading_size = int(real_font_size * (1.8 - seg.heading * 0.15))
+                        calc_font = self._load_font(heading_size)
+                    elif seg.code or seg.code_block:
+                        code_font = self._load_mono_font(real_font_size)
+                        if code_font:
+                            calc_font = code_font
+
+                    chars = list(seg.text)
+                    for i, char in enumerate(chars):
+                        char_width = int(calc_font.getlength(char))
+                        need_wrap = current_x + char_width > effective_width and current_x > 0
+                        if need_wrap and char in NO_LINE_START:
+                            need_wrap = False
+
+                        if not need_wrap and i == len(chars) - 2 and line_segments:
+                            next_char = chars[i + 1]
+                            next_width = int(calc_font.getlength(next_char))
+                            if current_x + char_width + next_width > effective_width:
+                                render_items.append((line_segments, False, False, False, None))
+                                line_segments = []
+                                current_x = 0
+                                need_wrap = False
+
+                        if need_wrap:
+                            if list_is_item and list_continuation_active:
+                                for prev_seg, _ in line_segments:
+                                    prev_seg.list_continuation = True
+                            render_items.append((line_segments, False, False, False, None))
+                            line_segments = []
+                            current_x = 0
+                            if list_is_item:
+                                list_first_line_emitted = True
+                                list_continuation_active = True
+                        line_segments.append((TextSegment(text=char,
+                                                           bold=seg.bold,
+                                                           italic=seg.italic,
+                                                           code=seg.code,
+                                                           strike=seg.strike,
+                                                           heading=seg.heading,
+                                                           quote=seg.quote,
+                                                           list_item=seg.list_item,
+                                                           list_ordered=seg.list_ordered,
+                                                           list_level=seg.list_level,
+                                                           list_index=seg.list_index,
+                                                           list_continuation=list_continuation_active), char_width))
+                        current_x += char_width
+
+            if line_segments:
+                if list_is_item:
+                    if list_continuation_active:
+                        for prev_seg, _ in line_segments:
+                            prev_seg.list_continuation = True
+                    else:
+                        list_first_line_emitted = True
+                render_items.append((line_segments, False, False, False, None))
+
+        # 计算画布高度
+        total_height = 0
+        for segments, is_empty, is_table, is_hr, _ in render_items:
+            if is_hr:
+                total_height += int(line_pixel_height * 0.8)
+            elif is_table:
+                table_h = self._calc_table_height(_, line_pixel_height, font,
+                                                  real_width, real_padding, scale)
+                total_height += table_h
+            elif is_empty:
+                total_height += int(line_pixel_height * 0.5)
+            else:
+                line_h = line_pixel_height
+                if any(seg.code_block for seg, _ in segments):
+                    line_h = int(line_pixel_height * 0.8)
+
+                # 计算该行中的最大字体高度（用于标题行自适应）
+                max_font_height = font_height
+                for seg, _ in segments:
+                    if seg.heading:
+                        heading_size = int(real_font_size * (1.8 - seg.heading * 0.15))
+                        heading_font = self._load_font(heading_size)
+                        h_height = self._get_font_height(heading_font, heading_size)
+                        max_font_height = max(max_font_height, h_height)
+
+                # 如果最大字体高度大于基础字体高度，调整行高
+                if max_font_height > font_height:
+                    # 保持 line_height 系数，用最大字体高度重新计算
+                    line_h = int(max_font_height * line_height)
+                    # 确保至少不小于原行高
+                    line_h = max(line_h, line_pixel_height)
+
+                total_height += line_h
+
+        canvas_height = total_height + real_padding * 2
+
+        # 创建画布
+        bg_rgb = self._hex_to_rgb(bg_color)
+        text_rgb = self._hex_to_rgb(text_color)
+        canvas = Image.new("RGBA", (real_width, canvas_height), (*bg_rgb, 255))
+        draw = ImageDraw.Draw(canvas)
+
+        # 绘制
+        y = real_padding
+        for segments, is_empty, is_table, is_hr, table_data in render_items:
+            if is_hr:
+                # 绘制分割线
+                hr_y = y + int(line_pixel_height * 0.4)
+                draw.line([(real_padding, hr_y), (real_width - real_padding, hr_y)],
+                         fill=(200, 200, 200), width=2)
+                y += int(line_pixel_height * 0.8)
+                continue
+
+            if is_table:
+                y = self._draw_table(draw, table_data, real_padding, y, real_width,
+                                    real_padding, font, real_font_size, line_pixel_height,
+                                    scale, text_rgb, bg_rgb)
+                continue
+
+            if is_empty:
+                y += int(line_pixel_height * 0.5)
+                continue
+
+            is_code_line = any(seg.code_block for seg, _ in segments)
+            is_quote_line = any(seg.quote for seg, _ in segments)
+            is_list_line = any(seg.list_item for seg, _ in segments)
+            is_list_continuation = any(seg.list_continuation for seg, _ in segments)
+
+            # 获取列表信息（取第一个列表片段的属性）
+            list_info = None
+            if is_list_line:
+                for seg, _ in segments:
+                    if seg.list_item:
+                        list_info = (seg.list_ordered, seg.list_level, seg.list_index)
+                        break
+
+            # 计算该行的实际行高和最大字体高度
+            current_line_height = line_pixel_height
+            max_font_height_in_line = font_height
+
+            for seg, _ in segments:
+                if seg.heading:
+                    heading_size = int(real_font_size * (1.8 - seg.heading * 0.15))
+                    heading_font = self._load_font(heading_size)
+                    h_height = self._get_font_height(heading_font, heading_size)
+                    max_font_height_in_line = max(max_font_height_in_line, h_height)
+
+            # 根据最大字体高度调整行高
+            if max_font_height_in_line > font_height:
+                current_line_height = int(max_font_height_in_line * line_height)
+                current_line_height = max(current_line_height, line_pixel_height)
+
+            if is_code_line:
+                current_line_height = int(line_pixel_height * 0.8)
+
+            # 代码块背景
+            if is_code_line:
+                bg_x = real_padding
+                bg_y = y - 2 * scale
+                bg_h = current_line_height + 4 * scale
+                draw.rounded_rectangle([bg_x, bg_y, real_width - real_padding, bg_y + bg_h],
+                                     radius=4 * scale, fill=(245, 245, 245))
+
+            # 引用左边框
+            quote_bar_width = 3 * scale
+            if is_quote_line:
+                bar_x = real_padding
+                bar_y = y
+                bar_h = current_line_height
+                draw.rectangle([bar_x, bar_y, bar_x + quote_bar_width, bar_y + bar_h],
+                             fill=(100, 149, 237))
+
+            x = real_padding
+            if is_quote_line:
+                x += quote_bar_width + 4 * scale
+
+            # 列表缩进和符号
+            list_indent_per_level = 20 * scale  # 每级缩进 20px
+            if is_list_line and list_info:
+                list_ordered, list_level, list_index = list_info
+                # 计算缩进
+                list_indent = list_level * list_indent_per_level
+                x += list_indent
+
+                # 仅首行绘制列表符号
+                if not is_list_continuation:
+                    if list_ordered:
+                        # 有序列表：绘制序号
+                        bullet_text = f"{list_index}."
+                    else:
+                        # 无序列表：绘制圆点
+                        bullet_text = "•"
+
+                    bullet_width = int(font.getlength(bullet_text + " "))
+                    bullet_y = y + (current_line_height - font_height) // 2
+                    draw.text((x, bullet_y), bullet_text, font=font, fill=text_rgb)
+                    x += bullet_width
+                else:
+                    # 延续行保持与符号后的文本对齐
+                    if list_ordered:
+                        bullet_text = f"{list_index}."
+                    else:
+                        bullet_text = "•"
+                    bullet_width = int(font.getlength(bullet_text + " "))
+                    x += bullet_width
+
+            for idx, (seg, w) in enumerate(segments):
+                if seg.is_emoji:
+                    emoji_img = self.emoji_handler.render_emoji(seg.text, emoji_size)
+                    if emoji_img:
+                        emoji_y = y + (current_line_height - emoji_size) // 2
+                        canvas.paste(emoji_img, (x, emoji_y), emoji_img)
+                        x += w
+                    else:
+                        # Emoji 渲染失败时回退为文本绘制，确保至少显示字符且位置正确
+                        emoji_fallback_width = int(font.getlength(seg.text))
+                        text_y = y + (current_line_height - font_height) // 2
+                        draw.text((x, text_y), seg.text, font=font, fill=text_rgb)
+                        x += emoji_fallback_width
+                    continue
+
+                draw_font = font
+                draw_color = text_rgb
+                current_font_size = real_font_size
+
+                if seg.heading:
+                    current_font_size = int(real_font_size * (1.8 - seg.heading * 0.15))
+                    draw_font = self._load_font(current_font_size, bold=True)
+                    current_font_height = self._get_font_height(draw_font, current_font_size)
+                elif seg.code or seg.code_block:
+                    code_font = self._load_mono_font(real_font_size)
+                    if code_font:
+                        draw_font = code_font
+                        current_font_height = self._get_font_height(draw_font, real_font_size)
+                    else:
+                        current_font_height = font_height
+                else:
+                    current_font_height = font_height
+
+                # 使用当前行的行高进行垂直居中
+                text_y = y + (current_line_height - current_font_height) // 2
+
+                if seg.code and not seg.code_block:
+                    prev_is_code = idx > 0 and segments[idx - 1][0].code and not segments[idx - 1][0].code_block
+                    if not prev_is_code:
+                        run_width = w
+                        next_idx = idx + 1
+                        while next_idx < len(segments):
+                            next_seg, next_w = segments[next_idx]
+                            if not next_seg.code or next_seg.code_block:
+                                break
+                            run_width += next_w
+                            next_idx += 1
+
+                        pad = max(1, int(2 * scale))
+                        bg_x = x - pad
+                        bg_y = text_y - 2 * scale
+                        bg_w = run_width + pad * 2
+                        bg_h = current_font_height + 4 * scale
+                        draw.rounded_rectangle([bg_x, bg_y, bg_x + bg_w, bg_y + bg_h],
+                                             radius=2 * scale, fill=(235, 235, 235))
+                    draw_color = (60, 60, 60)
+
+                if seg.strike:
+                    draw_color = (160, 160, 160)
+
+                if seg.italic and not seg.code and not seg.code_block:
+                    draw_color = (max(draw_color[0] - 20, 0),
+                                 max(draw_color[1] - 20, 0),
+                                 max(draw_color[2] - 20, 0))
+
+                if seg.quote:
+                    draw_color = (80, 80, 80)
+
+                draw.text((x, text_y), seg.text, font=draw_font, fill=draw_color)
+
+                if seg.strike:
+                    strike_y = text_y + current_font_height // 2 - 1
+                    draw.line([(x, strike_y), (x + w, strike_y)],
+                             fill=draw_color, width=max(1, scale))
+
+                if seg.bold and not seg.code and not seg.code_block:
+                    for offset_x, offset_y in [(1, 0), (0, 1), (1, 1), (-1, 0), (0, -1)]:
+                        draw.text((x + offset_x, text_y + offset_y), seg.text,
+                                 font=draw_font, fill=draw_color)
+
+                x += w
+
+            y += current_line_height
+
+        return self._save_image(canvas, bg_rgb)
+
+    def _get_font_height(self, font: ImageFont.FreeTypeFont, fallback: int) -> int:
+        """安全获取字体高度"""
+        try:
+            ascent, descent = font.getmetrics()
+            if ascent is None or descent is None:
+                return fallback
+            return ascent + descent
+        except Exception:
+            return fallback
+
+    def _wrap_text_segments_for_render(
+            self,
+            segments: List[TextSegment],
+            font: ImageFont.FreeTypeFont,
+            mono_font: Optional[ImageFont.FreeTypeFont],
+            max_width: int,
+    ) -> List[List[Tuple[TextSegment, int]]]:
+        """将带样式的片段按宽度换行（用于卡片渲染）"""
+        if max_width <= 0:
+            line = [(seg, int((mono_font or font).getlength(seg.text)))
+                    for seg in segments if seg.text]
+            return [line] if line else [[]]
+
+        lines: List[List[Tuple[TextSegment, int]]] = []
+        current: List[Tuple[TextSegment, int]] = []
+        current_width = 0
+
+        for seg in segments:
+            text = seg.text or ""
+            if not text:
+                continue
+
+            calc_font = mono_font or font if seg.code else font
+
+            for char in text:
+                char_width = int(calc_font.getlength(char))
+                need_wrap = current and (current_width + char_width > max_width)
+                if need_wrap and char in NO_LINE_START:
+                    need_wrap = False
+
+                if need_wrap:
+                    lines.append(current)
+                    current = []
+                    current_width = 0
+
+                current.append((TextSegment(
+                    text=char,
+                    bold=seg.bold,
+                    italic=seg.italic,
+                    code=seg.code,
+                    strike=seg.strike,
+                ), char_width))
+                current_width += char_width
+
+        if current:
+            lines.append(current)
+
+        if not lines:
+            lines.append([])
+
+        return lines
+
+    def _calc_table_height(self, table_data: List[TableRow], line_height, font,
+                           width: int, padding: int, scale: int) -> int:
+        """计算表格高度（卡片式布局）"""
+        if not table_data:
+            return line_height
+
+        headers: List[str] = []
+        data_rows: List[TableRow] = []
+        max_cols = 0
+        for row in table_data:
+            max_cols = max(max_cols, len(row.cells))
+            if row.is_header and not headers:
+                headers = [cell.text for cell in row.cells]
+            else:
+                data_rows.append(row)
+
+        if not data_rows:
+            data_rows = table_data
+
+        if not headers:
+            headers = [f"字段{i + 1}" for i in range(max_cols)]
+
+        available_width = width - padding * 2
+        bar_width = max(1, int(4 * scale))
+        card_padding = int(10 * scale)
+        card_margin = 0
+        content_width = max(1, available_width - card_padding * 2 - bar_width)
+
+        total_height = 0
+        for row in data_rows:
+            line_count = 0
+            for col_idx, cell in enumerate(row.cells):
+                label = headers[col_idx] if col_idx < len(headers) else f"字段{col_idx + 1}"
+                value_segments = cell.segments
+                value_text = "".join(seg.text for seg in value_segments if seg.text).strip()
+                if value_text:
+                    label_segment = TextSegment(text=f"{label}：")
+                    line_segments = [label_segment] + value_segments
+                else:
+                    line_segments = [TextSegment(text=f"{label}：")]
+
+                line_count += len(self._wrap_text_segments_for_render(
+                    line_segments,
+                    font,
+                    self._load_mono_font(getattr(font, "size", None) or 0),
+                    content_width,
+                ))
+
+            if line_count == 0:
+                line_count = 1
+
+            total_height += line_count * line_height + card_padding * 2
+
+        if len(data_rows) > 1:
+            total_height += card_margin * (len(data_rows) - 1)
+
+        return total_height
+
+    def _draw_table(self, draw, table_data: List[TableRow], x, y, width,
+                   padding, font, font_size, line_height, scale,
+                   text_rgb, bg_rgb) -> int:
+        """绘制表格（卡片式布局）"""
+        if not table_data:
+            return y
+
+        headers: List[str] = []
+        data_rows: List[TableRow] = []
+        max_cols = 0
+        for row in table_data:
+            max_cols = max(max_cols, len(row.cells))
+            if row.is_header and not headers:
+                headers = [cell.text for cell in row.cells]
+            else:
+                data_rows.append(row)
+
+        if not data_rows:
+            data_rows = table_data
+
+        if not headers:
+            headers = [f"字段{i + 1}" for i in range(max_cols)]
+
+        available_width = width - padding * 2
+        bar_width = max(1, int(4 * scale))
+        card_padding = int(10 * scale)
+        card_margin = 0
+        content_width = max(1, available_width - card_padding * 2 - bar_width)
+
+        bar_color = (100, 149, 237)
+        card_bg = (245, 245, 245)
+
+        current_y = y
+        mono_font = self._load_mono_font(getattr(font, "size", None) or 0)
+
+        for row in data_rows:
+            lines: List[List[Tuple[TextSegment, int]]] = []
+            for col_idx, cell in enumerate(row.cells):
+                label = headers[col_idx] if col_idx < len(headers) else f"字段{col_idx + 1}"
+                value_segments = cell.segments
+                value_text = "".join(seg.text for seg in value_segments if seg.text).strip()
+                if value_text:
+                    label_segment = TextSegment(text=f"{label}：")
+                    line_segments = [label_segment] + value_segments
+                else:
+                    line_segments = [TextSegment(text=f"{label}：")]
+
+                lines.extend(self._wrap_text_segments_for_render(
+                    line_segments,
+                    font,
+                    mono_font,
+                    content_width,
+                ))
+
+            if not lines:
+                lines = [[]]
+
+            card_height = len(lines) * line_height + card_padding * 2
+
+            draw.rounded_rectangle(
+                [x, current_y, x + available_width, current_y + card_height],
+                radius=6 * scale,
+                fill=card_bg,
+            )
+
+            draw.rectangle(
+                [x, current_y, x + bar_width, current_y + card_height],
+                fill=bar_color,
+            )
+
+            line_y = current_y + card_padding
+            text_x = x + bar_width + card_padding
+            for line in lines:
+                text_y = line_y + (line_height - font_size) // 2
+                draw_x = text_x
+
+                for seg, w in line:
+                    draw_font = font
+                    draw_color = text_rgb
+                    current_font_height = self._get_font_height(font, line_height)
+
+                    if seg.code:
+                        if mono_font:
+                            draw_font = mono_font
+                            current_font_height = self._get_font_height(draw_font, line_height)
+                    if seg.italic and not seg.code:
+                        draw_color = (max(draw_color[0] - 20, 0),
+                                      max(draw_color[1] - 20, 0),
+                                      max(draw_color[2] - 20, 0))
+                    if seg.strike:
+                        draw_color = (160, 160, 160)
+
+                    seg_y = line_y + (line_height - current_font_height) // 2
+
+                    if seg.code:
+                        bg_x = draw_x - 2 * scale
+                        bg_y = seg_y - 2 * scale
+                        bg_w = w + 4 * scale
+                        bg_h = current_font_height + 4 * scale
+                        draw.rounded_rectangle([bg_x, bg_y, bg_x + bg_w, bg_y + bg_h],
+                                             radius=2 * scale, fill=(235, 235, 235))
+                        draw_color = (60, 60, 60)
+
+                    draw.text((draw_x, seg_y), seg.text, font=draw_font, fill=draw_color)
+
+                    if seg.bold and not seg.code:
+                        for offset_x, offset_y in [(1, 0), (0, 1), (1, 1), (-1, 0), (0, -1)]:
+                            draw.text((draw_x + offset_x, seg_y + offset_y), seg.text,
+                                     font=draw_font, fill=draw_color)
+
+                    if seg.strike:
+                        strike_y = seg_y + current_font_height // 2 - 1
+                        draw.line([(draw_x, strike_y), (draw_x + w, strike_y)],
+                                 fill=draw_color, width=max(1, scale))
+
+                    draw_x += w
+
+                line_y += line_height
+
+            current_y += card_height + card_margin
+
+        return current_y
+    def _save_image(self, canvas, bg_rgb) -> str:
+        """保存图片"""
+        tmp = tempfile.NamedTemporaryFile(prefix="text2img_", suffix=".jpg", delete=False)
+        canvas_rgb = Image.new("RGB", canvas.size, bg_rgb)
+        canvas_rgb.paste(canvas, mask=canvas.split()[3] if canvas.mode == 'RGBA' else None)
+        canvas_rgb.save(tmp.name, format="JPEG", quality=80)
+        return tmp.name

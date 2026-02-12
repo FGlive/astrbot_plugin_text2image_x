@@ -18,9 +18,26 @@ class TextRenderer:
     """文本渲染器"""
 
     def __init__(self, config: Dict[str, Any], font_dir: Path):
+        from astrbot.api import logger
+        import tempfile
+        
         self.config = config
         self.font_dir = font_dir
-        self.emoji_handler = EmojiHandler(font_dir)
+        
+        # 从配置中读取 Emoji 相关参数
+        emoji_timeout = int(self._get_config("emoji_timeout", 10))
+        emoji_failed_ttl = int(self._get_config("emoji_failed_ttl", 3600))
+        emoji_cache_dir = self._get_config("emoji_cache_dir", None)
+        
+        # 转换缓存目录路径（如果提供）
+        cache_dir = Path(emoji_cache_dir) if emoji_cache_dir else font_dir.parent / ".emoji-cache"
+        
+        self.emoji_handler = EmojiHandler(
+            font_dir=font_dir,  # 保留兼容性，实际未使用
+            cache_dir=cache_dir,
+            timeout=emoji_timeout,
+            failed_ttl=emoji_failed_ttl
+        )
         self._font_cache: Dict[str, ImageFont.FreeTypeFont] = {}
         self._mono_font_cache: Dict[str, ImageFont.FreeTypeFont] = {}
 
@@ -224,7 +241,8 @@ class TextRenderer:
                 for seg in segments:
                     if seg.list_item:
                         list_indent_per_level = 20 * scale  # 与绘制阶段一致
-                        list_indent_total = (seg.list_level or 1) * list_indent_per_level
+                        # 修复：统一使用 seg.list_level，不再强制最小 1，确保与绘制阶段一致
+                        list_indent_total = seg.list_level * list_indent_per_level
                         # 计算符号宽度（与绘制阶段一致）
                         if seg.list_ordered:
                             bullet_text = f"{seg.list_index}."
@@ -233,7 +251,10 @@ class TextRenderer:
                         # 使用实际渲染宽度计算列表符号宽度
                         list_bullet_width = sum(self._get_char_render_width(font, c) for c in bullet_text) + int(font.getlength(" "))
                         break
+                # 计算有效宽度，增加最小值保护（至少 20px 或 emoji_size）
                 effective_width = text_area_width - list_indent_total - list_bullet_width
+                min_effective_width = max(20, emoji_size)
+                effective_width = max(effective_width, min_effective_width)
 
             for seg in segments:
                 if seg.code_block:

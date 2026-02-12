@@ -62,6 +62,12 @@
     "hint": "消息发送后多少秒自动撤回，0 表示不撤回",
     "default": 30
   },
+  "log_full_text": {
+    "type": "bool",
+    "description": "日志输出完整渲染文本",
+    "hint": "开启后将完整输出 AI 文本内容到日志，可能很长",
+    "default": false
+  },
   "font_name": {
     "type": "string",
     "description": "主字体文件名",

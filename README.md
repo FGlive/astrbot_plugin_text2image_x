@@ -24,6 +24,7 @@ AstrBot 插件，将 Bot 文字回复渲染为图片。
 | line_height | 行高倍数 | 1.6 |
 | bg_color | 背景色 | #ffffff |
 | text_color | 文字色 | #333333 |
+| log_full_text | 日志输出完整渲染文本 | false |
 | font_name | 主字体文件名（放置于 ziti 目录） | Source_Han_Serif_SC_Light_Light.otf |
 | mono_font_name | 等宽字体文件名（放置于 ziti 目录） | 空（自动回退系统字体） |
 | recall_enabled | 启用自动撤回 | false |

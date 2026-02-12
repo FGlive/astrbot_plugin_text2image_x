@@ -672,8 +672,10 @@ class TextRenderer:
             calc_font = mono_font or font if seg.code else font
 
             for char in text:
-                # 使用实际渲染宽度计算，避免字符右侧被裁切
-                char_width = self._get_char_render_width(calc_font, char, seg.bold)
+                # 同时考虑渲染宽度与 advance 宽度，避免相邻背景覆盖字符
+                render_width = self._get_char_render_width(calc_font, char, seg.bold)
+                advance_width = int(calc_font.getlength(char))
+                char_width = max(render_width, advance_width)
                 # 添加 2px 安全余量
                 need_wrap = current and (current_width + char_width > max_width - 2)
                 if need_wrap and char in NO_LINE_START:

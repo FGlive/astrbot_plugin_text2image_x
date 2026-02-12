@@ -832,8 +832,9 @@ class TextRenderer:
             line_y = current_y + card_padding
             text_x = x + bar_width + card_padding
             for line in lines:
-                text_y = line_y + (line_height - font_size) // 2
                 draw_x = text_x
+                backgrounds = []
+                text_ops = []
 
                 idx = 0
                 while idx < len(line):
@@ -870,35 +871,55 @@ class TextRenderer:
                         bg_y = seg_y - 2 * scale
                         bg_w = run_width + pad * 2
                         bg_h = current_font_height + 4 * scale
-                        draw.rounded_rectangle([bg_x, bg_y, bg_x + bg_w, bg_y + bg_h],
-                                             radius=2 * scale, fill=(235, 235, 235))
-                        draw_color = (60, 60, 60)
+                        backgrounds.append((bg_x, bg_y, bg_w, bg_h))
 
-                        draw.text((draw_x, seg_y), run_text, font=draw_font, fill=draw_color)
-
-                        if seg.strike:
-                            strike_y = seg_y + current_font_height // 2 - 1
-                            draw.line([(draw_x, strike_y), (draw_x + run_width, strike_y)],
-                                     fill=draw_color, width=max(1, scale))
+                        text_ops.append({
+                            "text": run_text,
+                            "x": draw_x,
+                            "y": seg_y,
+                            "font": draw_font,
+                            "color": (60, 60, 60),
+                            "bold": False,
+                            "strike": seg.strike,
+                            "width": run_width,
+                            "code": True,
+                        })
 
                         draw_x += run_width
                         idx = next_idx
                         continue
 
-                    draw.text((draw_x, seg_y), seg.text, font=draw_font, fill=draw_color)
-
-                    if seg.bold and not seg.code:
-                        for offset_x, offset_y in [(1, 0), (0, 1), (1, 1), (-1, 0), (0, -1)]:
-                            draw.text((draw_x + offset_x, seg_y + offset_y), seg.text,
-                                     font=draw_font, fill=draw_color)
-
-                    if seg.strike:
-                        strike_y = seg_y + current_font_height // 2 - 1
-                        draw.line([(draw_x, strike_y), (draw_x + w, strike_y)],
-                                 fill=draw_color, width=max(1, scale))
+                    text_ops.append({
+                        "text": seg.text,
+                        "x": draw_x,
+                        "y": seg_y,
+                        "font": draw_font,
+                        "color": draw_color,
+                        "bold": seg.bold,
+                        "strike": seg.strike,
+                        "width": w,
+                        "code": False,
+                    })
 
                     draw_x += w
                     idx += 1
+
+                for bg_x, bg_y, bg_w, bg_h in backgrounds:
+                    draw.rounded_rectangle([bg_x, bg_y, bg_x + bg_w, bg_y + bg_h],
+                                         radius=2 * scale, fill=(235, 235, 235))
+
+                for op in text_ops:
+                    draw.text((op["x"], op["y"]), op["text"], font=op["font"], fill=op["color"])
+
+                    if op["bold"] and not op["code"]:
+                        for offset_x, offset_y in [(1, 0), (0, 1), (1, 1), (-1, 0), (0, -1)]:
+                            draw.text((op["x"] + offset_x, op["y"] + offset_y), op["text"],
+                                     font=op["font"], fill=op["color"])
+
+                    if op["strike"]:
+                        strike_y = op["y"] + current_font_height // 2 - 1
+                        draw.line([(op["x"], strike_y), (op["x"] + op["width"], strike_y)],
+                                 fill=op["color"], width=max(1, scale))
 
                 line_y += line_height
 

@@ -206,24 +206,22 @@ class TextRenderer:
                     emoji_subs = self.emoji_handler.split_text(seg.text)
                     for es in emoji_subs:
                         # Emoji 片段不继承 code 属性，避免等宽字体渲染问题
-                        if not es.is_emoji:
-                            es.bold = es.bold or seg.bold
-                            es.italic = es.italic or seg.italic
-                            es.code = es.code or seg.code
-                            es.strike = es.strike or seg.strike
-                        else:
-                            # Emoji 片段只继承部分属性
-                            es.bold = es.bold or seg.bold
-                            es.italic = es.italic or seg.italic
-                            es.code = False  # 确保 emoji 不使用 code 样式
-                            es.strike = es.strike or seg.strike
-                        es.heading = es.heading or seg.heading
-                        es.quote = es.quote or seg.quote
-                        es.list_item = es.list_item or seg.list_item
-                        es.list_ordered = es.list_ordered or seg.list_ordered
-                        es.list_level = es.list_level or seg.list_level
-                        es.list_index = es.list_index or seg.list_index
-                        es.list_continuation = es.list_continuation or seg.list_continuation
+                        es.bold = seg.bold
+                        es.italic = seg.italic
+                        es.strike = seg.strike
+                        es.code = False if es.is_emoji else seg.code
+
+                        # 行级/列表属性显式继承，避免 0 值被 or 短路污染
+                        es.heading = seg.heading
+                        es.quote = seg.quote
+                        es.code_block = seg.code_block
+                        es.horizontal_rule = seg.horizontal_rule
+                        es.list_item = seg.list_item
+                        es.list_ordered = seg.list_ordered
+                        es.list_level = seg.list_level
+                        es.list_index = seg.list_index
+                        es.list_continuation = seg.list_continuation
+
                         segments.append(es)
                 elif not seg.is_emoji:
                     segments.append(seg)
@@ -233,31 +231,15 @@ class TextRenderer:
             current_x = 0
             list_is_item = any(seg.list_item for seg in segments)
             list_continuation_active = False
-            list_first_line_emitted = False
 
-            # 计算列表行的有效宽度（扣除缩进和符号宽度）
-            effective_width = text_area_width
-            list_bullet_width = 0
-            list_indent_total = 0
-            if list_is_item:
-                # 获取列表信息
-                for seg in segments:
-                    if seg.list_item:
-                        list_indent_per_level = 20 * scale  # 与绘制阶段一致
-                        # 修复：统一使用 seg.list_level，不再强制最小 1，确保与绘制阶段一致
-                        list_indent_total = seg.list_level * list_indent_per_level
-                        # 计算符号宽度（与绘制阶段一致）
-                        if seg.list_ordered:
-                            bullet_text = f"{seg.list_index}."
-                        else:
-                            bullet_text = "•"
-                        # 使用实际渲染宽度计算列表符号宽度
-                        list_bullet_width = sum(self._get_char_render_width(font, c) for c in bullet_text) + int(font.getlength(" "))
-                        break
-                # 计算有效宽度，增加最小值保护（至少 20px 或 emoji_size）
-                effective_width = text_area_width - list_indent_total - list_bullet_width
-                min_effective_width = max(20, emoji_size)
-                effective_width = max(effective_width, min_effective_width)
+            line_layout = self._build_line_layout(
+                segments=segments,
+                text_area_width=text_area_width,
+                font=font,
+                scale=scale,
+                min_content_width=max(20, emoji_size),
+            )
+            effective_width = line_layout["effective_width"]
 
             for seg in segments:
                 if seg.code_block:
@@ -274,8 +256,6 @@ class TextRenderer:
                             if list_continuation_active:
                                 for prev_seg, _ in line_segments:
                                     prev_seg.list_continuation = True
-                            else:
-                                list_first_line_emitted = True
                             list_continuation_active = True
                         render_items.append((line_segments, False, False, False, None))
                         line_segments = []
@@ -290,8 +270,6 @@ class TextRenderer:
                             if list_continuation_active:
                                 for prev_seg, _ in line_segments:
                                     prev_seg.list_continuation = True
-                            else:
-                                list_first_line_emitted = True
                             list_continuation_active = True
                         render_items.append((line_segments, False, False, False, None))
                         line_segments = []
@@ -335,7 +313,6 @@ class TextRenderer:
                             line_segments = []
                             current_x = 0
                             if list_is_item:
-                                list_first_line_emitted = True
                                 list_continuation_active = True
                         line_segments.append((TextSegment(text=char,
                                                            bold=seg.bold,
@@ -352,12 +329,9 @@ class TextRenderer:
                         current_x += char_width
 
             if line_segments:
-                if list_is_item:
-                    if list_continuation_active:
-                        for prev_seg, _ in line_segments:
-                            prev_seg.list_continuation = True
-                    else:
-                        list_first_line_emitted = True
+                if list_is_item and list_continuation_active:
+                    for prev_seg, _ in line_segments:
+                        prev_seg.list_continuation = True
                 render_items.append((line_segments, False, False, False, None))
 
         # 计算画布高度
@@ -429,17 +403,18 @@ class TextRenderer:
                 continue
 
             is_code_line = any(seg.code_block for seg, _ in segments)
-            is_quote_line = any(seg.quote for seg, _ in segments)
-            is_list_line = any(seg.list_item for seg, _ in segments)
             is_list_continuation = any(seg.list_continuation for seg, _ in segments)
 
-            # 获取列表信息（取第一个列表片段的属性）
-            list_info = None
-            if is_list_line:
-                for seg, _ in segments:
-                    if seg.list_item:
-                        list_info = (seg.list_ordered, seg.list_level, seg.list_index)
-                        break
+            line_segments_only = [seg for seg, _ in segments]
+            line_layout = self._build_line_layout(
+                segments=line_segments_only,
+                text_area_width=text_area_width,
+                font=font,
+                scale=scale,
+                min_content_width=max(20, emoji_size),
+            )
+            is_quote_line = line_layout["quote_offset"] > 0
+            is_list_line = bool(line_layout["list_bullet_text"])
 
             # 计算该行的实际行高和最大字体高度
             current_line_height = line_pixel_height
@@ -474,7 +449,7 @@ class TextRenderer:
                                      radius=4 * scale, fill=(245, 245, 245))
 
             # 引用左边框
-            quote_bar_width = 3 * scale
+            quote_bar_width = line_layout["quote_bar_width"]
             if is_quote_line:
                 bar_x = real_padding
                 bar_y = y
@@ -482,40 +457,17 @@ class TextRenderer:
                 draw.rectangle([bar_x, bar_y, bar_x + quote_bar_width, bar_y + bar_h],
                              fill=(100, 149, 237))
 
-            x = real_padding
-            if is_quote_line:
-                x += quote_bar_width + 4 * scale
+            x = real_padding + line_layout["quote_offset"]
 
-            # 列表缩进和符号
-            list_indent_per_level = 20 * scale  # 每级缩进 20px
-            if is_list_line and list_info:
-                list_ordered, list_level, list_index = list_info
-                # 计算缩进
-                list_indent = list_level * list_indent_per_level
-                x += list_indent
+            if is_list_line:
+                x += line_layout["list_indent"]
+                bullet_text = line_layout["list_bullet_text"]
+                bullet_width = line_layout["list_bullet_width"]
 
-                # 仅首行绘制列表符号
                 if not is_list_continuation:
-                    if list_ordered:
-                        # 有序列表：绘制序号
-                        bullet_text = f"{list_index}."
-                    else:
-                        # 无序列表：绘制圆点
-                        bullet_text = "•"
-
-                    # 使用实际渲染宽度计算列表符号宽度
-                    bullet_width = sum(self._get_char_render_width(font, c) for c in bullet_text) + int(font.getlength(" "))
                     bullet_y = y + (current_line_height - font_height) // 2
                     draw.text((x, bullet_y), bullet_text, font=font, fill=text_rgb)
-                    x += bullet_width
-                else:
-                    # 延续行保持与符号后的文本对齐
-                    if list_ordered:
-                        bullet_text = f"{list_index}."
-                    else:
-                        bullet_text = "•"
-                    bullet_width = sum(self._get_char_render_width(font, c) for c in bullet_text) + int(font.getlength(" "))
-                    x += bullet_width
+                x += bullet_width
 
             for idx, (seg, w) in enumerate(segments):
                 if seg.is_emoji:
@@ -612,6 +564,52 @@ class TextRenderer:
             return ascent + descent
         except Exception:
             return fallback
+
+    def _build_line_layout(self,
+                           segments: List[TextSegment],
+                           text_area_width: int,
+                           font: ImageFont.FreeTypeFont,
+                           scale: int,
+                           min_content_width: int) -> Dict[str, Any]:
+        """统一计算行布局参数，确保换行与绘制阶段口径一致。"""
+        quote_bar_width = 3 * scale
+        quote_offset = quote_bar_width + 4 * scale if any(seg.quote for seg in segments) else 0
+
+        list_ordered = False
+        list_level = 0
+        list_index = 0
+        list_bullet_text = ""
+        list_bullet_width = 0
+
+        for seg in segments:
+            if seg.list_item:
+                list_ordered = seg.list_ordered
+                list_level = max(0, seg.list_level)
+                list_index = max(0, seg.list_index)
+                list_bullet_text = f"{list_index}." if list_ordered else "•"
+                list_bullet_width = sum(self._get_char_render_width(font, c) for c in list_bullet_text) + int(font.getlength(" "))
+                break
+
+        list_indent_per_level = 20 * scale
+        raw_list_indent = list_level * list_indent_per_level
+
+        available_for_list = max(0, text_area_width - quote_offset - list_bullet_width - min_content_width)
+        list_indent = min(raw_list_indent, available_for_list)
+
+        content_start_offset = quote_offset + list_indent + list_bullet_width
+        effective_width = max(1, text_area_width - content_start_offset)
+
+        return {
+            "quote_bar_width": quote_bar_width,
+            "quote_offset": quote_offset,
+            "list_ordered": list_ordered,
+            "list_level": list_level,
+            "list_index": list_index,
+            "list_bullet_text": list_bullet_text,
+            "list_bullet_width": list_bullet_width,
+            "list_indent": list_indent,
+            "effective_width": effective_width,
+        }
 
     def _get_char_render_width(self, font: ImageFont.FreeTypeFont, char: str,
                                is_bold: bool = False) -> int:

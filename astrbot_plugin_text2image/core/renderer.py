@@ -179,7 +179,8 @@ class TextRenderer:
                     continue
 
             if not md_segments:
-                if ctx.in_table:
+                # 表格/代码块解析过程中的中间行不应生成空白占位
+                if ctx.in_table or ctx.in_code_block:
                     continue
                 render_items.append(([], True, False, False, None))
                 continue

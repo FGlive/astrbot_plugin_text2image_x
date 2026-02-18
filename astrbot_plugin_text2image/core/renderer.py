@@ -147,16 +147,24 @@ class TextRenderer:
         width = int(self._get_config("image_width", 375))
         scale = int(self._get_config("image_scale", 2))
         padding = int(self._get_config("padding", 24))
+        padding_left = int(self._get_config("padding_left", padding))
+        padding_right = int(self._get_config("padding_right", padding))
         font_size = int(self._get_config("font_size", 24))
         line_height = float(self._get_config("line_height", 1.6))
         bg_color = str(self._get_config("bg_color", "#ffffff"))
         text_color = str(self._get_config("text_color", "#333333"))
 
         real_width = width * scale
-        real_padding = padding * scale
+        real_padding_y = padding * scale
+        real_padding_left = max(0, padding_left * scale)
+        real_padding_right = max(0, padding_right * scale)
         real_font_size = font_size * scale
         emoji_size = int(real_font_size * 1.1)
-        text_area_width = real_width - real_padding * 2
+
+        content_left = min(real_width - 1, real_padding_left) if real_width > 0 else 0
+        content_right = max(content_left + 1, real_width - real_padding_right)
+        content_right = min(real_width, content_right)
+        text_area_width = max(1, content_right - content_left)
 
         font = self._load_font(real_font_size)
         font_height = self._get_font_height(font, real_font_size)
@@ -374,7 +382,7 @@ class TextRenderer:
                 total_height += int(line_pixel_height * 0.8)
             elif is_table:
                 table_h = self._calc_table_height(_, line_pixel_height, font,
-                                                  real_width, real_padding, scale)
+                                                  text_area_width, scale)
                 total_height += table_h
             elif is_empty:
                 total_height += int(line_pixel_height * 0.5)
@@ -406,7 +414,7 @@ class TextRenderer:
 
                 total_height += line_h
 
-        canvas_height = total_height + real_padding * 2
+        canvas_height = total_height + real_padding_y * 2
 
         # 创建画布
         bg_rgb = self._hex_to_rgb(bg_color, "#ffffff")
@@ -415,19 +423,19 @@ class TextRenderer:
         draw = ImageDraw.Draw(canvas)
 
         # 绘制
-        y = real_padding
+        y = real_padding_y
         for segments, is_empty, is_table, is_hr, table_data in render_items:
             if is_hr:
                 # 绘制分割线
                 hr_y = y + int(line_pixel_height * 0.4)
-                draw.line([(real_padding, hr_y), (real_width - real_padding, hr_y)],
+                draw.line([(content_left, hr_y), (content_right, hr_y)],
                          fill=(200, 200, 200), width=2)
                 y += int(line_pixel_height * 0.8)
                 continue
 
             if is_table:
-                y = self._draw_table(draw, table_data, real_padding, y, real_width,
-                                    real_padding, font, real_font_size, line_pixel_height,
+                y = self._draw_table(draw, table_data, content_left, y, text_area_width,
+                                    font, real_font_size, line_pixel_height,
                                     scale, text_rgb, bg_rgb)
                 continue
 
@@ -475,22 +483,22 @@ class TextRenderer:
 
             # 代码块背景
             if is_code_line:
-                bg_x = real_padding
+                bg_x = content_left
                 bg_y = y - 2 * scale
                 bg_h = current_line_height + 4 * scale
-                draw.rounded_rectangle([bg_x, bg_y, real_width - real_padding, bg_y + bg_h],
+                draw.rounded_rectangle([bg_x, bg_y, content_right, bg_y + bg_h],
                                      radius=4 * scale, fill=(245, 245, 245))
 
             # 引用左边框
             quote_bar_width = line_layout["quote_bar_width"]
             if is_quote_line:
-                bar_x = real_padding
+                bar_x = content_left
                 bar_y = y
                 bar_h = current_line_height
                 draw.rectangle([bar_x, bar_y, bar_x + quote_bar_width, bar_y + bar_h],
                              fill=(100, 149, 237))
 
-            x = real_padding + line_layout["quote_offset"]
+            x = content_left + line_layout["quote_offset"]
 
             if is_list_line:
                 x += line_layout["list_indent"]
@@ -743,7 +751,7 @@ class TextRenderer:
         return lines
 
     def _calc_table_height(self, table_data: List[TableRow], line_height, font,
-                           width: int, padding: int, scale: int) -> int:
+                           content_width: int, scale: int) -> int:
         """计算表格高度（卡片式布局）"""
         if not table_data:
             return line_height
@@ -764,11 +772,11 @@ class TextRenderer:
         if not headers:
             headers = [f"字段{i + 1}" for i in range(max_cols)]
 
-        available_width = width - padding * 2
+        available_width = max(1, content_width)
         bar_width = max(1, int(4 * scale))
         card_padding = int(10 * scale)
         card_margin = 0
-        content_width = max(1, available_width - card_padding * 2 - bar_width)
+        card_content_width = max(1, available_width - card_padding * 2 - bar_width)
 
         total_height = 0
         for row in data_rows:
@@ -787,7 +795,7 @@ class TextRenderer:
                     line_segments,
                     font,
                     self._load_mono_font(getattr(font, "size", None) or 0),
-                    content_width,
+                    card_content_width,
                 ))
 
             if line_count == 0:
@@ -800,8 +808,8 @@ class TextRenderer:
 
         return total_height
 
-    def _draw_table(self, draw, table_data: List[TableRow], x, y, width,
-                   padding, font, font_size, line_height, scale,
+    def _draw_table(self, draw, table_data: List[TableRow], x, y, content_width,
+                   font, font_size, line_height, scale,
                    text_rgb, bg_rgb) -> int:
         """绘制表格（卡片式布局）"""
         if not table_data:
@@ -823,11 +831,11 @@ class TextRenderer:
         if not headers:
             headers = [f"字段{i + 1}" for i in range(max_cols)]
 
-        available_width = width - padding * 2
+        available_width = max(1, content_width)
         bar_width = max(1, int(4 * scale))
         card_padding = int(10 * scale)
         card_margin = 0
-        content_width = max(1, available_width - card_padding * 2 - bar_width)
+        card_content_width = max(1, available_width - card_padding * 2 - bar_width)
 
         bar_color = (100, 149, 237)
         card_bg = (245, 245, 245)
@@ -851,7 +859,7 @@ class TextRenderer:
                     line_segments,
                     font,
                     mono_font,
-                    content_width,
+                    card_content_width,
                 ))
 
             if not lines:

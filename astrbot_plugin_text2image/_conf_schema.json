@@ -30,6 +30,16 @@
     "description": "内边距（像素）",
     "default": 24
   },
+  "padding_left": {
+    "type": "int",
+    "description": "左边距（像素，默认继承 padding）",
+    "default": 24
+  },
+  "padding_right": {
+    "type": "int",
+    "description": "右边距（像素，默认继承 padding）",
+    "default": 24
+  },
   "font_size": {
     "type": "int",
     "description": "字体大小",

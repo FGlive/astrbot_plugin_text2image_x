@@ -122,6 +122,8 @@ class Text2ImagePlugin(Star):
             "image_width",
             "image_scale",
             "padding",
+            "padding_left",
+            "padding_right",
             "font_size",
             "line_height",
             "bg_color",

@@ -20,6 +20,9 @@ AstrBot 插件，将 Bot 文字回复渲染为图片。
 | render_char_threshold | 字符阈值，0=不限 | 0 |
 | image_width | 逻辑宽度 | 375 |
 | image_scale | 渲染倍数 | 2 |
+| padding | 上下内边距（左右默认值） | 24 |
+| padding_left | 左边距（默认继承 padding） | 24 |
+| padding_right | 右边距（默认继承 padding） | 24 |
 | font_size | 字体大小 | 24 |
 | line_height | 行高倍数 | 1.6 |
 | bg_color | 背景色 | #ffffff |

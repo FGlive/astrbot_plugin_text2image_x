@@ -273,11 +273,29 @@ class Text2ImagePlugin(Star):
             else:
                 logger.debug(f"[text2image-x] 非 aiocqhttp 事件类型，使用普通模式")
 
-        # 普通模式：组件级别追加 Image，保留原链文本供下游上下文使用
+        # 普通模式：组件级别替换 Plain → Image，文本存入 event extra 供上下文使用
         try:
-            result.chain.append(Comp.Image(file=f'base64://{img_data}'))
+            image_comp = Comp.Image(file=f'base64://{img_data}')
+            # 找到第一个 Plain 组件的位置，用 Image 替换；移除其余 Plain
+            new_chain = []
+            plain_replaced = False
+            for seg in result.chain:
+                is_plain = (
+                    (PLAIN_COMPONENT_TYPES and isinstance(seg, PLAIN_COMPONENT_TYPES))
+                    or (hasattr(seg, "text") and seg.__class__.__name__.lower() in {"plain", "text"})
+                )
+                if is_plain:
+                    if not plain_replaced:
+                        new_chain.append(image_comp)
+                        plain_replaced = True
+                    # 其余 Plain 跳过（已被合并渲染为一张图）
+                else:
+                    new_chain.append(seg)
+            if not plain_replaced:
+                new_chain.append(image_comp)
+            result.chain = new_chain
             event.set_extra("text2image_rendered_text", text)
-            logger.info(f"[text2image-x] 已渲染为图片并保留原始文本")
+            logger.info(f"[text2image-x] 已渲染为图片，文本已存入上下文")
         except Exception as exc:
             logger.error("[text2image-x] 创建图片组件失败: %s", exc)
 

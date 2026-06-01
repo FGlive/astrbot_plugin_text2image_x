@@ -212,6 +212,8 @@ __marimo__/
 
 # Claude Code
 .claude/
+CLAUDE.md
+**/CLAUDE.md
 
 # Emoji cache
 .emoji-cache/

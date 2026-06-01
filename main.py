@@ -163,8 +163,9 @@ class Text2ImagePlugin(Star):
                 builder.append(getattr(seg, "text", "") or "")
             elif hasattr(seg, "text") and seg.__class__.__name__.lower() in {"plain", "text"}:
                 builder.append(getattr(seg, "text", "") or "")
-            else:
-                return None
+            # 跳过非 Plain 组件（At, Reply, Image 等），继续提取
+        if not builder:
+            return None
         text = "".join(builder).strip()
         return text if text else None
 
@@ -254,7 +255,8 @@ class Text2ImagePlugin(Star):
                                 self._schedule_recall(client, int(msg_id))
                                 logger.info(f"[text2image-x] 已安排 {recall_time}s 后撤回消息 {msg_id}")
                         
-                        # 清空原消息链，阻止重复发送
+                        # 清空原消息链，阻止重复发送；存文本供下游上下文使用
+                        event.set_extra("text2image_rendered_text", text)
                         result.chain.clear()
                         event.stop_event()
                         return
@@ -263,6 +265,7 @@ class Text2ImagePlugin(Star):
                         # 超时错误（1200）消息可能已发送，不回退
                         if 'retcode=1200' in error_str or 'Timeout' in error_str:
                             logger.warning(f"[text2image-x] 发送超时但消息可能已送达，无法撤回")
+                            event.set_extra("text2image_rendered_text", text)
                             result.chain.clear()
                             event.stop_event()
                             return
@@ -270,9 +273,11 @@ class Text2ImagePlugin(Star):
             else:
                 logger.debug(f"[text2image-x] 非 aiocqhttp 事件类型，使用普通模式")
 
-        # 普通模式：替换消息链
+        # 普通模式：组件级别追加 Image，保留原链文本供下游上下文使用
         try:
-            result.chain = [Comp.Image(file=f'base64://{img_data}')]
+            result.chain.append(Comp.Image(file=f'base64://{img_data}'))
+            event.set_extra("text2image_rendered_text", text)
+            logger.info(f"[text2image-x] 已渲染为图片并保留原始文本")
         except Exception as exc:
             logger.error("[text2image-x] 创建图片组件失败: %s", exc)
 

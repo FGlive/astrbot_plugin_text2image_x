@@ -11,6 +11,17 @@ from .styles import TextSegment, TableRow
 from .emoji import EmojiHandler
 from .markdown import parse_markdown, LineContext, parse_table, _serialize_table
 
+try:
+    from astrbot.api import logger
+except Exception:  # 兼容独立测试/未安装 AstrBot 的环境
+    import logging
+    logger = logging.getLogger("astrbot_plugin_text2image_x.renderer")
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(levelname)s - %(message)s"))
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+
 # 不能出现在行首的标点符号（避头标点）
 NO_LINE_START = set('，。、；：？！）】》」』"\',.;:?!)>]}·…—～')
 
@@ -19,7 +30,6 @@ class TextRenderer:
     """文本渲染器"""
 
     def __init__(self, config: Dict[str, Any], font_dir: Path):
-        from astrbot.api import logger
         import tempfile
         
         self.config = config
@@ -29,15 +39,19 @@ class TextRenderer:
         emoji_timeout = int(self._get_config("emoji_timeout", 10))
         emoji_failed_ttl = int(self._get_config("emoji_failed_ttl", 3600))
         emoji_cache_dir = self._get_config("emoji_cache_dir", None)
-        
+        emoji_mode = str(self._get_config("emoji_mode", "auto")).lower().strip()
+
         # 转换缓存目录路径（如果提供）
         cache_dir = Path(emoji_cache_dir) if emoji_cache_dir else font_dir.parent / ".emoji-cache"
-        
+
+        self._emoji_font_cache: Dict[str, Optional[ImageFont.FreeTypeFont]] = {}
         self.emoji_handler = EmojiHandler(
-            font_dir=font_dir,  # 保留兼容性，实际未使用
+            font_dir=font_dir,
             cache_dir=cache_dir,
             timeout=emoji_timeout,
-            failed_ttl=emoji_failed_ttl
+            failed_ttl=emoji_failed_ttl,
+            emoji_mode=emoji_mode,
+            fallback_font_provider=self._load_emoji_font,
         )
         self._font_cache: Dict[str, ImageFont.FreeTypeFont] = {}
         self._mono_font_cache: Dict[str, ImageFont.FreeTypeFont] = {}
@@ -129,6 +143,55 @@ class TextRenderer:
         self._mono_font_cache[cache_key] = None
         return None
 
+    def _load_emoji_font(self, size: int) -> Optional[ImageFont.FreeTypeFont]:
+        """加载彩色 emoji 字体
+
+        优先级: 配置字体 -> 系统字体探测 -> ziti 目录探测
+        """
+        cache_key = f"emoji_{size}"
+        if cache_key in self._emoji_font_cache:
+            return self._emoji_font_cache[cache_key]
+
+        configured_font = self._get_config("emoji_font_name", "")
+        candidates = []
+
+        if configured_font:
+            candidates.append(self.font_dir / configured_font)
+
+        system_font_paths = [
+            Path("C:/Windows/Fonts"),
+            Path("/usr/share/fonts"),
+            Path("/System/Library/Fonts"),
+            self.font_dir,
+        ]
+        system_font_names = [
+            "NotoColorEmoji.ttf",
+            "NotoColorEmoji-Regular.ttf",
+            "TwemojiMozilla.ttf",
+            "Segoe UI Emoji.ttf",
+            "seguiemj.ttf",
+            "Apple Color Emoji.ttc",
+            "Apple Color Emoji.ttf",
+        ]
+
+        for font_dir in system_font_paths:
+            if not font_dir.exists():
+                continue
+            for font_name in system_font_names:
+                candidates.append(font_dir / font_name)
+
+        for font_path in candidates:
+            if font_path.exists():
+                try:
+                    font = ImageFont.truetype(str(font_path), size=size)
+                    self._emoji_font_cache[cache_key] = font
+                    return font
+                except Exception:
+                    continue
+
+        self._emoji_font_cache[cache_key] = None
+        return None
+
     def _hex_to_rgb(self, color_value: str, fallback: str = "#ffffff") -> Tuple[int, int, int]:
         """颜色字符串转 RGB，兼容十六进制与命名色。"""
         try:
@@ -160,6 +223,11 @@ class TextRenderer:
         real_padding_right = max(0, padding_right * scale)
         real_font_size = font_size * scale
         emoji_size = int(real_font_size * 1.1)
+
+        # 若可能使用本地彩色 emoji 字体，提前加载一次（按实际渲染尺寸）
+        emoji_font = None
+        if self.emoji_handler.use_fallback_font:
+            emoji_font = self._load_emoji_font(emoji_size)
 
         content_left = min(real_width - 1, real_padding_left) if real_width > 0 else 0
         content_right = max(content_left + 1, real_width - real_padding_right)
@@ -521,7 +589,7 @@ class TextRenderer:
 
             for idx, (seg, w) in enumerate(segments):
                 if seg.is_emoji:
-                    emoji_img = self.emoji_handler.render_emoji(seg.text, emoji_size)
+                    emoji_img = self.emoji_handler.render_emoji(seg.text, emoji_size, fallback_font=emoji_font)
                     if emoji_img:
                         emoji_y = y + (current_line_height - emoji_size) // 2
                         canvas.paste(emoji_img, (x, emoji_y), emoji_img)

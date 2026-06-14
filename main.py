@@ -133,6 +133,8 @@ class Text2ImagePlugin(Star):
             "emoji_cache_dir",
             "emoji_timeout",
             "emoji_failed_ttl",
+            "emoji_mode",
+            "emoji_font_name",
             "hide_table_first_column_label",
         )
         return tuple(cfg.get(k) for k in keys)

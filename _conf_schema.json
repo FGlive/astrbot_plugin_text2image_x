@@ -108,6 +108,19 @@
     "hint": "下载失败的 emoji 在此时间内不再重复请求，避免反复失败。默认 3600 秒（1 小时）。",
     "default": 3600
   },
+  "emoji_mode": {
+    "type": "string",
+    "description": "Emoji 加载模式",
+    "hint": "cdn=仅使用 Twemoji CDN；auto=优先 CDN，失败时回退本地彩色 emoji 字体；font=完全禁用网络，仅使用本地彩色 emoji 字体。",
+    "default": "auto",
+    "options": ["cdn", "auto", "font"]
+  },
+  "emoji_font_name": {
+    "type": "string",
+    "description": "本地彩色 emoji 字体文件名",
+    "hint": "将彩色 emoji 字体（如 NotoColorEmoji.ttf / TwemojiMozilla.ttf / Apple Color Emoji.ttc）放入 ziti 目录并填写文件名；留空则自动探测系统字体。",
+    "default": ""
+  },
   "char_width_cache_limit": {
     "type": "int",
     "description": "字符宽度缓存上限",

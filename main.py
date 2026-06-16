@@ -8,12 +8,13 @@
 import asyncio
 import base64
 import os
+import re
 import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.provider import LLMResponse
 from astrbot.api.star import Context, Star
 
@@ -34,6 +35,8 @@ PLAIN_COMPONENT_TYPES = tuple(
     for name in ("Plain", "Text")
     if hasattr(Comp, name)
 )
+
+_URL_RE = re.compile(r"https?://[^\s<>,\"{}|\\^`\[\])]+", re.IGNORECASE)
 
 
 class Text2ImagePlugin(Star):
@@ -171,6 +174,68 @@ class Text2ImagePlugin(Star):
         text = "".join(builder).strip()
         return text if text else None
 
+    def _extract_urls(self, text: str) -> list[str]:
+        """从文本中提取 URL 列表（去重并保持顺序）
+
+        Args:
+            text: 原始文本
+
+        Returns:
+            提取到的链接列表
+        """
+        if not text:
+            return []
+        urls = _URL_RE.findall(text)
+        if not urls:
+            return []
+        # 去除尾部常见标点（如 Markdown 链接的右括号、逗号、句末标点）
+        cleaned = [url.rstrip("),.;:!?\"'>") for url in urls]
+        # 使用 dict.fromkeys 去重并保留顺序
+        return list(dict.fromkeys(cleaned))
+
+    async def _send_link_forward(self, event: AstrMessageEvent, links: list[str]) -> None:
+        """将链接以 QQ 合并转发消息的形式发送到当前对话
+
+        Args:
+            event: 当前消息事件
+            links: 要发送的链接列表
+        """
+        if not links:
+            return
+
+        if not HAS_AIOCQHTTP or not isinstance(event, AiocqhttpMessageEvent):
+            logger.warning(
+                "[text2image-x] send_links_as_forward 仅支持 aiocqhttp (QQ) 平台，"
+                "当前平台不会发送合并转发消息"
+            )
+            return
+
+        sender_name = str(self.cfg().get("forward_sender_name", "AI 助手") or "AI 助手")
+        intro = str(self.cfg().get("forward_intro_text", "以下为本条回复中的可点击链接") or "")
+
+        # 最佳-effort 获取 Bot 自身 QQ 号
+        uin = "0"
+        raw_event = getattr(event.message_obj, "raw_message", None)
+        if raw_event is not None and hasattr(raw_event, "get"):
+            uin = str(raw_event.get("self_id", "0"))
+        if uin == "0" and hasattr(event.message_obj, "self_id"):
+            uin = str(getattr(event.message_obj, "self_id", "0"))
+
+        nodes: list[Comp.Node] = []
+        if intro:
+            nodes.append(Comp.Node(name=sender_name, uin=uin, content=[Comp.Plain(text=intro)]))
+        for link in links:
+            nodes.append(Comp.Node(name=sender_name, uin=uin, content=[Comp.Plain(text=link)]))
+
+        if not nodes:
+            return
+
+        try:
+            await event.send(MessageChain([Comp.Nodes(nodes=nodes)]))
+            logger.info(f"[text2image-x] 已发送链接合并转发消息，共 {len(links)} 个链接")
+        except Exception as exc:
+            logger.error("[text2image-x] 发送链接合并转发消息失败: %s", exc)
+
     @filter.on_decorating_result(priority=-10)
     async def on_decorating_result(self, event: AstrMessageEvent, *args, **kwargs):
         if not self._cfg_bool("enable_render", True):
@@ -195,6 +260,12 @@ class Text2ImagePlugin(Star):
         keep_llm_log = self._cfg_bool("keep_llm_log", True)
         if keep_llm_log:
             logger.info(f"[text2image-x] LLM回复: {preview}")
+
+        # 如果开启链接合并转发，先提取并发送链接
+        if self._cfg_bool("send_links_as_forward", False):
+            links = self._extract_urls(text)
+            if links:
+                await self._send_link_forward(event, links)
 
         char_threshold = int(self.cfg().get("render_char_threshold", 0))
         if char_threshold > 0 and len(text) > char_threshold:

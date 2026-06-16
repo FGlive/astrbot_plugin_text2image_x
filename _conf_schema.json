@@ -15,6 +15,23 @@
     "description": "渲染字符阈值（0 为不限制，超过阈值则直接发送纯文本）",
     "default": 0
   },
+  "send_links_as_forward": {
+    "type": "bool",
+    "description": "当 AI 回复包含链接时，额外发送一条 QQ 合并转发消息",
+    "hint": "开启后，检测到链接时会额外把链接整理成 QQ 的合并转发消息发出；本功能需要 aiocqhttp (QQ) 平台",
+    "default": false
+  },
+  "forward_sender_name": {
+    "type": "string",
+    "description": "合并转发消息中显示的发送者昵称",
+    "default": "AI 助手"
+  },
+  "forward_intro_text": {
+    "type": "string",
+    "description": "合并转发消息首条引导文案",
+    "hint": "留空则不显示引导文案",
+    "default": "以下为本条回复中的可点击链接"
+  },
   "image_width": {
     "type": "int",
     "description": "图片逻辑宽度（手机宽度建议 375）",

@@ -17,7 +17,7 @@ AstrBot 插件，将 Bot 文字回复渲染为图片。
 |--------|------|--------|
 | enable_render | 启用渲染 | true |
 | render_scope | llm_only / all_text | llm_only |
-| render_char_threshold | 字符阈值，0=不限 | 0 |
+| render_char_threshold | 字符阈值（0=始终渲染图片；超过阈值才渲染，不超过则发纯文本） | 0 |
 | image_width | 逻辑宽度 | 375 |
 | image_scale | 渲染倍数 | 2 |
 | padding | 上下内边距（左右默认值） | 24 |

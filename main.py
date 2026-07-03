@@ -268,7 +268,8 @@ class Text2ImagePlugin(Star):
                 await self._send_link_forward(event, links)
 
         char_threshold = int(self.cfg().get("render_char_threshold", 0))
-        if char_threshold > 0 and len(text) > char_threshold:
+        # 阈值为 0：直接渲染图片；超过阈值才渲染为图片，不超过则发送纯文本
+        if char_threshold > 0 and len(text) <= char_threshold:
             return
 
         async with self._render_semaphore:

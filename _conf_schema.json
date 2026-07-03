@@ -12,7 +12,7 @@
   },
   "render_char_threshold": {
     "type": "int",
-    "description": "渲染字符阈值（0 为不限制，超过阈值则直接发送纯文本）",
+    "description": "渲染字符阈值（0 为始终渲染图片；超过阈值才渲染为图片，不超过则发送纯文本）",
     "default": 0
   },
   "send_links_as_forward": {

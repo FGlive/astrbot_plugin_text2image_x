@@ -1,6 +1,6 @@
 """样式定义"""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, List
 
 
@@ -29,6 +29,9 @@ class TextSegment:
     is_newline: bool = False      # 是否强制换行
     url: str = ""                 # 链接 URL（[text](url) 或 ![alt](url)）
     is_image: bool = False        # 是否为图片语法
+    # 表格结构化数据标记
+    is_table: bool = False        # 是否为表格占位段
+    table_rows: List["TableRow"] = field(default_factory=list)
 
 
 @dataclass

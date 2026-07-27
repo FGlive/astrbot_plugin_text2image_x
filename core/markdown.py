@@ -204,68 +204,28 @@ def _parse_line(text: str, ctx: LineContext) -> list[TextSegment]:
 
 
 def _serialize_table(ctx: LineContext) -> list[TextSegment]:
-    """将表格转换为列表形式的 TextSegment 集合"""
+    """将当前累积的表格生成为结构化表格占位段"""
     if not ctx.table_rows:
         return []
 
-    # 提取表头作为字段名
-    headers = []
-    data_rows = []
-    max_cols = 0
+    rows = [TableRow(cells=[
+        TableCell(text=cell.text, segments=[
+            TextSegment(
+                text=seg.text,
+                is_emoji=seg.is_emoji,
+                bold=seg.bold,
+                italic=seg.italic,
+                code=seg.code,
+                strike=seg.strike,
+                url=seg.url,
+                is_image=seg.is_image,
+            )
+            for seg in cell.segments
+        ])
+        for cell in row.cells
+    ], is_header=row.is_header) for row in ctx.table_rows]
 
-    for row in ctx.table_rows:
-        max_cols = max(max_cols, len(row.cells))
-        if row.is_header and not headers:
-            headers = [cell.text for cell in row.cells]
-        else:
-            data_rows.append(row)
-
-    # 如果没有表头，使用默认字段名
-    if not headers:
-        headers = [f"字段{i + 1}" for i in range(max_cols)]
-
-    # 如果所有行都是表头，则没有数据行
-    if not data_rows:
-        data_rows = ctx.table_rows
-
-    hide_first_col_label = bool(ctx.hide_table_first_column_label)
-
-    # 为每个单元格生成列表项
-    result_segments = []
-    for row in data_rows:
-        for col_idx, cell in enumerate(row.cells):
-            # 获取字段名
-            field_name = headers[col_idx] if col_idx < len(headers) else f"字段{col_idx + 1}"
-
-            # 获取单元格内容片段并继承列表属性
-            cell_content = []
-            for seg in cell.segments:
-                seg.list_item = True
-                seg.list_ordered = False
-                seg.list_level = 0
-                cell_content.append(seg)
-
-            # 开关：隐藏第一列字段名标签（仅隐藏标签，不隐藏内容）
-            if hide_first_col_label and col_idx == 0:
-                if cell_content and any(seg.text for seg in cell_content):
-                    result_segments.extend(cell_content)
-                continue
-
-            # 创建标签片段（字段名）
-            label_seg = TextSegment(text=f"{field_name}：")
-            label_seg.list_item = True
-            label_seg.list_ordered = False
-            label_seg.list_level = 0
-
-            # 如果单元格有内容，合并标签和内容
-            if cell_content and any(seg.text for seg in cell_content):
-                result_segments.append(label_seg)
-                result_segments.extend(cell_content)
-            else:
-                # 单元格为空，只显示标签
-                result_segments.append(label_seg)
-
-    return result_segments
+    return [TextSegment(text="", is_table=True, table_rows=rows)]
 
 
 def _parse_inline_styles_with_autoclose(text: str, ctx: LineContext) -> list[TextSegment]:
@@ -511,7 +471,9 @@ def _merge_segments(segments: list[TextSegment]) -> list[TextSegment]:
                 last.list_index == seg.list_index and
                 last.list_continuation == seg.list_continuation and
                 last.url == seg.url and
-                last.is_image == seg.is_image):
+                last.is_image == seg.is_image and
+                last.is_table == seg.is_table and
+                last.table_rows == seg.table_rows):
             last.text += seg.text
         else:
             merged.append(seg)

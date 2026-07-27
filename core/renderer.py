@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from PIL import Image, ImageColor, ImageDraw, ImageFont
 
 from .styles import TextSegment, TableRow
+from .table_layout import calc_table_card_height, draw_table_cards
 from .emoji import EmojiHandler
 from .markdown import parse_markdown, LineContext, parse_table, _serialize_table
 
@@ -237,6 +238,7 @@ class TextRenderer:
         font = self._load_font(real_font_size)
         font_height = self._get_font_height(font, real_font_size)
         line_pixel_height = int(real_font_size * line_height)
+        table_line_height = int(real_font_size * 1.35)
 
         # 解析所有行
         lines = text.split('\n')
@@ -252,10 +254,15 @@ class TextRenderer:
                 render_items.append(([], False, False, True, None))
                 continue
 
-            # 检查是否是表格（已弃用：表格现在直接转为列表渲染）
-            # 保留此分支以兼容旧版本生成的 no_wrap 表格段
+            # 检查是否是结构化表格标记
+            if md_segments and md_segments[0].is_table:
+                table_data = md_segments[0].table_rows
+                if table_data:
+                    render_items.append(([], False, True, False, table_data))
+                continue
+
+            # 保留旧兼容分支
             if md_segments and md_segments[0].no_wrap and md_segments[0].text:
-                # 尝试解析为表格
                 table_data = parse_table(md_segments[0].text)
                 if table_data:
                     render_items.append(([], False, True, False, table_data))
@@ -445,12 +452,14 @@ class TextRenderer:
                         prev_seg.list_continuation = True
                 render_items.append((line_segments, False, False, False, None))
 
-        # 收尾：如果文本以表格结束，补序列化未刷出的表格数据
+        # 收尾：如果文本以表格结束，补结构化表格数据
         if ctx.in_table and ctx.table_rows:
             table_segments = _serialize_table(ctx)
-            if table_segments:
-                render_items.append((table_segments, False, False, False, None))
+            if table_segments and table_segments[0].table_rows:
+                render_items.append(([], False, True, False, table_segments[0].table_rows))
             ctx.in_table = False
+            ctx.table_rows.clear()
+            ctx.table_header_parsed = False
 
         # 计算画布高度
         total_height = 0
@@ -458,7 +467,7 @@ class TextRenderer:
             if is_hr:
                 total_height += int(line_pixel_height * 0.8)
             elif is_table:
-                table_h = self._calc_table_height(_, line_pixel_height, font,
+                table_h = self._calc_table_height(_, table_line_height, font,
                                                   text_area_width, scale)
                 total_height += table_h
             elif is_empty:
@@ -512,7 +521,7 @@ class TextRenderer:
 
             if is_table:
                 y = self._draw_table(draw, table_data, content_left, y, text_area_width,
-                                    font, real_font_size, line_pixel_height,
+                                    font, real_font_size, table_line_height,
                                     scale, text_rgb, bg_rgb)
                 continue
 
@@ -779,6 +788,16 @@ class TextRenderer:
             self._char_width_cache.popitem(last=False)
         return width
 
+    def wrap_text_segments(
+            self,
+            segments: List[TextSegment],
+            font: ImageFont.FreeTypeFont,
+            mono_font: Optional[ImageFont.FreeTypeFont],
+            max_width: int,
+    ) -> List[List[Tuple[TextSegment, int]]]:
+        """公开不换行的片段排版入口，供表格布局使用。"""
+        return self._wrap_text_segments_for_render(segments, font, mono_font, max_width)
+
     def _wrap_text_segments_for_render(
             self,
             segments: List[TextSegment],
@@ -806,7 +825,6 @@ class TextRenderer:
 
             for char in text:
                 char_width = self._get_char_render_width(calc_font, char, seg.bold)
-                # 添加 2px 安全余量
                 need_wrap = current and (current_width + char_width > max_width - 2)
                 if need_wrap and char in NO_LINE_START:
                     need_wrap = False
@@ -835,240 +853,145 @@ class TextRenderer:
 
         return lines
 
+    def _draw_segment_line(
+        self,
+        draw: ImageDraw.ImageDraw,
+        line: List[Tuple[TextSegment, int]],
+        x: int,
+        y: int,
+        line_height: int,
+        font: ImageFont.FreeTypeFont,
+        mono_font: Optional[ImageFont.FreeTypeFont],
+        font_size: int,
+        scale: int,
+        text_rgb: Tuple[int, int, int],
+        override_color: Optional[Tuple[int, int, int]] = None,
+    ) -> int:
+        """绘制已排版好的单行片段，处理粗体/斜体/删除线/链接/代码背景"""
+        if not line:
+            return x
+
+        idx = 0
+        ops: List[Tuple[str, int, ImageFont.FreeTypeFont, Tuple[int, int, int], bool, bool, TextSegment]] = []
+        backgrounds: List[Tuple[int, int, int, int]] = []
+
+        draw_x = x
+        while idx < len(line):
+            seg, w = line[idx]
+            draw_font = font
+            draw_color = override_color or text_rgb
+            current_font_height = self._get_font_height(font, font_size)
+
+            if seg.code and mono_font:
+                draw_font = mono_font
+                current_font_height = self._get_font_height(draw_font, font_size)
+
+            if override_color is None:
+                if seg.code:
+                    draw_color = (60, 60, 60)
+                if seg.italic and not seg.code and not seg.code_block:
+                    draw_color = (max(draw_color[0] - 20, 0),
+                                  max(draw_color[1] - 20, 0),
+                                  max(draw_color[2] - 20, 0))
+                if seg.strike:
+                    draw_color = (160, 160, 160)
+                if seg.url:
+                    draw_color = (0, 0, 238)
+
+            seg_y = y + (line_height - current_font_height) // 2
+
+            if seg.code:
+                run_text = seg.text
+                run_width = w
+                next_idx = idx + 1
+                while (next_idx < len(line) and
+                       line[next_idx][0].code and not line[next_idx][0].code_block):
+                    next_seg, next_w = line[next_idx]
+                    run_text += next_seg.text
+                    run_width += next_w
+                    next_idx += 1
+
+                pad = max(1, int(2 * scale))
+                bg_x = draw_x - pad
+                bg_y = seg_y - 2 * scale
+                bg_w = run_width + pad * 2
+                bg_h = current_font_height + 4 * scale
+                backgrounds.append((bg_x, bg_y, bg_w, bg_h))
+
+                ops.append((run_text, draw_x, draw_font, draw_color, False, False, TextSegment(text="", url=seg.url)))
+                draw_x += run_width
+                idx = next_idx
+                continue
+
+            ops.append((seg.text, draw_x, draw_font, draw_color, seg.bold, seg.strike, seg))
+            draw_x += w
+            idx += 1
+
+        for bg_x, bg_y, bg_w, bg_h in backgrounds:
+            draw.rounded_rectangle([bg_x, bg_y, bg_x + bg_w, bg_y + bg_h],
+                                   radius=2 * scale, fill=(235, 235, 235))
+
+        for text, op_x, op_font, color, is_bold, is_strike, seg in ops:
+            draw.text((op_x, y + (line_height - self._get_font_height(op_font, font_size)) // 2),
+                      text, font=op_font, fill=color)
+
+            if is_bold:
+                for offset_x, offset_y in [(1, 0), (0, 1), (1, 1), (-1, 0), (0, -1)]:
+                    draw.text((op_x + offset_x,
+                               y + (line_height - self._get_font_height(op_font, font_size)) // 2 + offset_y),
+                              text, font=op_font, fill=color)
+
+            if is_strike:
+                current_font_height = self._get_font_height(op_font, font_size)
+                strike_y = y + (line_height - current_font_height) // 2 + current_font_height // 2 - 1
+                draw.line([(op_x, strike_y), (op_x + int(draw.textlength(text, font=op_font)), strike_y)],
+                          fill=color, width=max(1, scale))
+
+            if seg.url:
+                current_font_height = self._get_font_height(op_font, font_size)
+                underline_y = y + (line_height - current_font_height) // 2 + current_font_height + max(1, scale)
+                line_width = int(draw.textlength(text, font=op_font))
+                draw.line([(op_x, underline_y), (op_x + line_width, underline_y)],
+                          fill=(0, 0, 238), width=max(1, scale))
+
+        return draw_x
+
     def _calc_table_height(self, table_data: List[TableRow], line_height, font,
                            content_width: int, scale: int) -> int:
         """计算表格高度（卡片式布局）"""
-        if not table_data:
-            return line_height
-
-        headers: List[str] = []
-        data_rows: List[TableRow] = []
-        max_cols = 0
-        for row in table_data:
-            max_cols = max(max_cols, len(row.cells))
-            if row.is_header and not headers:
-                headers = [cell.text for cell in row.cells]
-            else:
-                data_rows.append(row)
-
-        if not data_rows:
-            data_rows = table_data
-
-        if not headers:
-            headers = [f"字段{i + 1}" for i in range(max_cols)]
-
-        available_width = max(1, content_width)
-        bar_width = max(1, int(4 * scale))
-        card_padding = int(10 * scale)
-        card_margin = 0
-        card_content_width = max(1, available_width - card_padding * 2 - bar_width)
-
-        total_height = 0
-        for row in data_rows:
-            line_count = 0
-            for col_idx, cell in enumerate(row.cells):
-                label = headers[col_idx] if col_idx < len(headers) else f"字段{col_idx + 1}"
-                value_segments = cell.segments
-                value_text = "".join(seg.text for seg in value_segments if seg.text).strip()
-                if value_text:
-                    label_segment = TextSegment(text=f"{label}：")
-                    line_segments = [label_segment] + value_segments
-                else:
-                    line_segments = [TextSegment(text=f"{label}：")]
-
-                line_count += len(self._wrap_text_segments_for_render(
-                    line_segments,
-                    font,
-                    self._load_mono_font(getattr(font, "size", None) or 0),
-                    card_content_width,
-                ))
-
-            if line_count == 0:
-                line_count = 1
-
-            total_height += line_count * line_height + card_padding * 2
-
-        if len(data_rows) > 1:
-            total_height += card_margin * (len(data_rows) - 1)
-
-        return total_height
+        return calc_table_card_height(
+            self,
+            table_data,
+            line_height,
+            font,
+            self._load_mono_font(getattr(font, "size", None) or 0),
+            content_width,
+            scale,
+            bool(self._get_config("hide_table_first_column_label", False)),
+        )
 
     def _draw_table(self, draw, table_data: List[TableRow], x, y, content_width,
                    font, font_size, line_height, scale,
                    text_rgb, bg_rgb) -> int:
         """绘制表格（卡片式布局）"""
-        if not table_data:
-            return y
-
-        headers: List[str] = []
-        data_rows: List[TableRow] = []
-        max_cols = 0
-        for row in table_data:
-            max_cols = max(max_cols, len(row.cells))
-            if row.is_header and not headers:
-                headers = [cell.text for cell in row.cells]
-            else:
-                data_rows.append(row)
-
-        if not data_rows:
-            data_rows = table_data
-
-        if not headers:
-            headers = [f"字段{i + 1}" for i in range(max_cols)]
-
-        available_width = max(1, content_width)
-        bar_width = max(1, int(4 * scale))
-        card_padding = int(10 * scale)
-        card_margin = 0
-        card_content_width = max(1, available_width - card_padding * 2 - bar_width)
-
-        bar_color = (100, 149, 237)
-        card_bg = (245, 245, 245)
-
-        current_y = y
         mono_font = self._load_mono_font(getattr(font, "size", None) or 0)
+        return draw_table_cards(
+            self,
+            draw,
+            table_data,
+            x,
+            y,
+            content_width,
+            font,
+            mono_font,
+            font_size,
+            line_height,
+            scale,
+            text_rgb,
+            bg_rgb,
+            bool(self._get_config("hide_table_first_column_label", False)),
+        )
 
-        for row in data_rows:
-            lines: List[List[Tuple[TextSegment, int]]] = []
-            for col_idx, cell in enumerate(row.cells):
-                label = headers[col_idx] if col_idx < len(headers) else f"字段{col_idx + 1}"
-                value_segments = cell.segments
-                value_text = "".join(seg.text for seg in value_segments if seg.text).strip()
-                if value_text:
-                    label_segment = TextSegment(text=f"{label}：")
-                    line_segments = [label_segment] + value_segments
-                else:
-                    line_segments = [TextSegment(text=f"{label}：")]
-
-                lines.extend(self._wrap_text_segments_for_render(
-                    line_segments,
-                    font,
-                    mono_font,
-                    card_content_width,
-                ))
-
-            if not lines:
-                lines = [[]]
-
-            card_height = len(lines) * line_height + card_padding * 2
-
-            draw.rounded_rectangle(
-                [x, current_y, x + available_width, current_y + card_height],
-                radius=6 * scale,
-                fill=card_bg,
-            )
-
-            draw.rectangle(
-                [x, current_y, x + bar_width, current_y + card_height],
-                fill=bar_color,
-            )
-
-            line_y = current_y + card_padding
-            text_x = x + bar_width + card_padding
-            for line in lines:
-                draw_x = text_x
-                backgrounds = []
-                text_ops = []
-
-                idx = 0
-                while idx < len(line):
-                    seg, w = line[idx]
-                    draw_font = font
-                    draw_color = text_rgb
-                    current_font_height = self._get_font_height(font, font_size)
-
-                    if seg.code:
-                        if mono_font:
-                            draw_font = mono_font
-                            current_font_height = self._get_font_height(draw_font, font_size)
-                    if seg.italic and not seg.code:
-                        draw_color = (max(draw_color[0] - 20, 0),
-                                      max(draw_color[1] - 20, 0),
-                                      max(draw_color[2] - 20, 0))
-                    if seg.strike:
-                        draw_color = (160, 160, 160)
-                    if seg.url:
-                        draw_color = (0, 0, 238)
-
-                    seg_y = line_y + (line_height - current_font_height) // 2
-
-                    if seg.code:
-                        run_text = seg.text
-                        run_width = w
-                        next_idx = idx + 1
-                        while next_idx < len(line) and line[next_idx][0].code:
-                            next_seg, next_w = line[next_idx]
-                            run_text += next_seg.text
-                            run_width += next_w
-                            next_idx += 1
-
-                        pad = max(1, int(2 * scale))
-                        bg_x = draw_x - pad
-                        bg_y = seg_y - 2 * scale
-                        bg_w = run_width + pad * 2
-                        bg_h = current_font_height + 4 * scale
-                        backgrounds.append((bg_x, bg_y, bg_w, bg_h))
-
-                        text_ops.append({
-                            "text": run_text,
-                            "x": draw_x,
-                            "y": seg_y,
-                            "font": draw_font,
-                            "color": (60, 60, 60),
-                            "bold": False,
-                            "strike": seg.strike,
-                            "width": run_width,
-                            "code": True,
-                        })
-
-                        draw_x += run_width
-                        idx = next_idx
-                        continue
-
-                    text_ops.append({
-                        "text": seg.text,
-                        "x": draw_x,
-                        "y": seg_y,
-                        "font": draw_font,
-                        "color": draw_color,
-                        "bold": seg.bold,
-                        "strike": seg.strike,
-                        "width": w,
-                        "code": False,
-                        "url": seg.url,
-                        "is_image": seg.is_image,
-                    })
-
-                    draw_x += w
-                    idx += 1
-
-                for bg_x, bg_y, bg_w, bg_h in backgrounds:
-                    draw.rounded_rectangle([bg_x, bg_y, bg_x + bg_w, bg_y + bg_h],
-                                         radius=2 * scale, fill=(235, 235, 235))
-
-                for op in text_ops:
-                    draw.text((op["x"], op["y"]), op["text"], font=op["font"], fill=op["color"])
-
-                    if op["bold"] and not op["code"]:
-                        for offset_x, offset_y in [(1, 0), (0, 1), (1, 1), (-1, 0), (0, -1)]:
-                            draw.text((op["x"] + offset_x, op["y"] + offset_y), op["text"],
-                                     font=op["font"], fill=op["color"])
-
-                    if op["strike"]:
-                        strike_y = op["y"] + current_font_height // 2 - 1
-                        draw.line([(op["x"], strike_y), (op["x"] + op["width"], strike_y)],
-                                 fill=op["color"], width=max(1, scale))
-
-                    if op.get("url"):
-                        underline_y = op["y"] + current_font_height + max(1, scale)
-                        draw.line([(op["x"], underline_y), (op["x"] + op["width"], underline_y)],
-                                 fill=(0, 0, 238), width=max(1, scale))
-
-                line_y += line_height
-
-            current_y += card_height + card_margin
-
-        return current_y
     def _save_image(self, canvas, bg_rgb) -> str:
         """保存图片"""
         tmp = tempfile.NamedTemporaryFile(prefix="text2img_", suffix=".jpg", delete=False)
